@@ -1,0 +1,17 @@
+# Local SDK and archives
+PrizmSDK/
+PrizmSDK-win-*.zip
+src/*.zip
+
+# Compiler outputs and temporary logs
+*.o
+*.d
+*.bin
+build/**/*.g3a
+src/**/*.g3a
+*.log
+*.log.err
+build/**/build/
+build/_verify_ms/
+
+# Final deliverables in output/ are intentionally committed.
