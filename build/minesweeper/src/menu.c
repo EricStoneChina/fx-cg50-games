@@ -82,7 +82,7 @@ void Menu_draw(Menu* menu) {
     int best = PersonalBest_get(menu->width, menu->height, menu->mines);
     x = 24;
     y = 128;
-    PrintMini(&x, &y, "Personal Best: ", TEXT_MODE_TRANSPARENT_BACKGROUND, 0xffffffff, 0, 0, COLOR_BLACK, COLOR_WHITE, true, 0);
+    PrintMini(&x, &y, "Best: ", TEXT_MODE_TRANSPARENT_BACKGROUND, 0xffffffff, 0, 0, COLOR_BLACK, COLOR_WHITE, true, 0);
     if (best > 0) {
         Utils_clearAndFillBuffer(buf, best / 10);
         PrintMini(&x, &y, (const char*)buf, TEXT_MODE_TRANSPARENT_BACKGROUND, 0xffffffff, 0, 0, COLOR_NAVY, COLOR_WHITE, true, 0);
@@ -94,7 +94,9 @@ void Menu_draw(Menu* menu) {
         PrintMini(&x, &y, "--", TEXT_MODE_TRANSPARENT_BACKGROUND, 0xffffffff, 0, 0, COLOR_NAVY, COLOR_WHITE, true, 0);
     }
 
-    PrintCXY(LCD_WIDTH_PX / 2 - 72, LCD_HEIGHT_PX - 40, "Continue", TEXT_MODE_TRANSPARENT_BACKGROUND, -1, COLOR_BLACK, COLOR_WHITE, true, 0);
+    int continueX = LCD_WIDTH_PX / 2 - (8 * charWidth) / 2;
+    int continueY = LCD_HEIGHT_PX - 32;
+    PrintMini(&continueX, &continueY, "Continue", TEXT_MODE_TRANSPARENT_BACKGROUND, 0xffffffff, 0, 0, COLOR_BLACK, COLOR_WHITE, true, 0);
 
     if (menu->settingRow != 3) {
         // calculator cursor position
@@ -107,12 +109,12 @@ void Menu_draw(Menu* menu) {
             TEXT_COLOR_BLACK
         );
     } else {
-        int x = LCD_WIDTH_PX / 2 - 72;
-        int y = LCD_HEIGHT_PX - 40;
+        int x = LCD_WIDTH_PX / 2 - (8 * charWidth) / 2;
+        int y = LCD_HEIGHT_PX - 32;
 
         Bdisp_Rectangle(
             x - 4, y - 4,
-            x + 8*18 + 4, y + 18 + 4,
+            x + 8*charWidth + 4, y + 18 + 4,
             TEXT_COLOR_BLACK
         );
     }
