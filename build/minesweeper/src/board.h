@@ -1,6 +1,9 @@
 #pragma once
 #include "utils.h"
 
+#define BOARD_MAX_WIDTH 16
+#define BOARD_MAX_HEIGHT 8
+
 typedef struct {
     char* data;
     int width;

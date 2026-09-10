@@ -6,8 +6,8 @@
 #include <fxcg/rtc.h>
 
 void Menu_create(Menu* menu) {
-    menu->width = 9;
-    menu->height = 9;
+    menu->width = BOARD_MAX_WIDTH;
+    menu->height = BOARD_MAX_HEIGHT;
     menu->mines = 10;
 
     menu->settingCursorPosition = 0;
@@ -297,6 +297,9 @@ void Menu_handleTextKeypress(Menu* menu, int key) {
 }
 
 void Menu_fixMineCount(Menu* menu) {
+    if (menu->width > BOARD_MAX_WIDTH) menu->width = BOARD_MAX_WIDTH;
+    if (menu->height > BOARD_MAX_HEIGHT) menu->height = BOARD_MAX_HEIGHT;
+
     if (menu->mines > (menu->width * menu->height) * 0.9) {
         menu->mines = (menu->width * menu->height) * 0.9;
     }

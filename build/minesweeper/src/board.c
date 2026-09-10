@@ -17,6 +17,9 @@ void _incrementMineCount(Board* board, int row, int col, void* mineCount) {
 }
 
 void Board_create(Board* board, int width, int height, int mines, bool fake) {
+    if (width > BOARD_MAX_WIDTH) width = BOARD_MAX_WIDTH;
+    if (height > BOARD_MAX_HEIGHT) height = BOARD_MAX_HEIGHT;
+
     board->width = width;
     board->height = height;
     board->mines = mines;
