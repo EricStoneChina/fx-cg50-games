@@ -21,6 +21,7 @@ typedef struct {
 
     bool lost;
     bool won;
+    bool newPersonalBest;
 
     bool firstReveal;
 
@@ -36,6 +37,7 @@ typedef struct {
 } Board;
 
 void Board_create(Board* board, int width, int height, int mines, bool fake);
+void Board_createSafe(Board* board, int width, int height, int mines, bool fake, int safeRow, int safeCol);
 void Board_free(Board* board);
 
 void Board_draw(Board* board);

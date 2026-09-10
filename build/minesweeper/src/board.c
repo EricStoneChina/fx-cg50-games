@@ -1,4 +1,5 @@
 #include "board.h"
+#include "personal_best.h"
 #include "utils.h"
 #include <fxcg/heap.h>
 #include <fxcg/keyboard.h>
@@ -16,7 +17,7 @@ void _incrementMineCount(Board* board, int row, int col, void* mineCount) {
     }
 }
 
-void Board_create(Board* board, int width, int height, int mines, bool fake) {
+static void Board_createInternal(Board* board, int width, int height, int mines, bool fake, int safeRow, int safeCol) {
     if (width > BOARD_MAX_WIDTH) width = BOARD_MAX_WIDTH;
     if (height > BOARD_MAX_HEIGHT) height = BOARD_MAX_HEIGHT;
 
@@ -35,6 +36,7 @@ void Board_create(Board* board, int width, int height, int mines, bool fake) {
 
     board->won = false;
     board->lost = false;
+    board->newPersonalBest = false;
 
     board->firstReveal = true;
 
@@ -54,19 +56,38 @@ void Board_create(Board* board, int width, int height, int mines, bool fake) {
         board->data[i] = 0;
     }
 
-    // place mines
-    for (int i = 0; i < mines; i++) {
-        int row = Utils_randrange(0, height);
-        int col = Utils_randrange(0, width);
+    // Build and shuffle a finite list of valid mine positions. This always
+    // terminates, including on tiny and very dense boards.
+    int safeArea = 0;
+    if (safeRow >= 0 && safeCol >= 0) {
+        int top = safeRow > 0 ? safeRow - 1 : safeRow;
+        int bottom = safeRow + 1 < height ? safeRow + 1 : safeRow;
+        int left = safeCol > 0 ? safeCol - 1 : safeCol;
+        int right = safeCol + 1 < width ? safeCol + 1 : safeCol;
+        safeArea = (bottom - top + 1) * (right - left + 1);
+    }
+    bool clearNeighbours = safeRow >= 0 && width * height - safeArea >= mines;
 
-        char* cell = Board_getCell(board, row, col);
-
-        if (*cell == (kTileTypeMine | COVER_TILE_BIT)) {
-            i--;
-            continue;
+    int candidates[BOARD_MAX_WIDTH * BOARD_MAX_HEIGHT];
+    int candidateCount = 0;
+    for (int row = 0; row < height; row++) {
+        for (int col = 0; col < width; col++) {
+            if (row == safeRow && col == safeCol) continue;
+            if (clearNeighbours && row >= safeRow - 1 && row <= safeRow + 1 && col >= safeCol - 1 && col <= safeCol + 1) continue;
+            candidates[candidateCount++] = row * width + col;
         }
+    }
 
-        *cell = kTileTypeMine | COVER_TILE_BIT;
+    if (mines > candidateCount) mines = candidateCount;
+    board->mines = mines;
+    for (int i = candidateCount - 1; i > 0; i--) {
+        int swap = Utils_randrange(0, i + 1);
+        int temp = candidates[i];
+        candidates[i] = candidates[swap];
+        candidates[swap] = temp;
+    }
+    for (int i = 0; i < mines; i++) {
+        board->data[candidates[i]] = kTileTypeMine | COVER_TILE_BIT;
     }
 
     // and place other tiles around the mines
@@ -86,7 +107,20 @@ void Board_create(Board* board, int width, int height, int mines, bool fake) {
     if (!fake) globalBoard = board;
 }
 
+void Board_create(Board* board, int width, int height, int mines, bool fake) {
+    Board_createInternal(board, width, height, mines, fake, -1, -1);
+}
+
+void Board_createSafe(Board* board, int width, int height, int mines, bool fake, int safeRow, int safeCol) {
+    Board_createInternal(board, width, height, mines, fake, safeRow, safeCol);
+}
+
 void Board_free(Board* board) {
+    if (board->timer >= 0) {
+        Timer_Stop(board->timer);
+        Timer_Deinstall(board->timer);
+        board->timer = -1;
+    }
     sys_free(board->data);
     sys_free(board);
     globalBoard = 0x0;
@@ -164,6 +198,9 @@ void Board_drawStatusArea(Board* board) {
             Utils_clearAndFillBuffer(buf, centiseconds);
             PrintMini(&x, &y, (const char*)buf, 1 << 6, 0xffffffff, 0, 0, COLOR_NAVY, COLOR_WHITE, true, 0);
             PrintMini(&x, &y, "s!", 1 << 6, 0xffffffff, 0, 0, COLOR_BLACK, COLOR_WHITE, true, 0);
+            if (board->newPersonalBest) {
+                PrintMini(&x, &y, " NEW PB!", 1 << 6, 0xffffffff, 0, 0, COLOR_RED, COLOR_WHITE, true, 0);
+            }
         } else {
             PrintMini(&x, &y, "(Press any button to return)", 1 << 6, 0xffffffff, 0, 0, COLOR_BLACK, COLOR_WHITE, true, 0);
         }
@@ -303,6 +340,10 @@ bool Board_handleKeypress(Board* board, int key) {
         case KEY_PRGM_EXIT: {
             return true;
         }
+
+        case KEY_PRGM_ACON: {
+            return true;
+        }
     }
 
     return false;
@@ -380,19 +421,15 @@ void Board_revealSingleCell(Board* board, int row, int col, bool force) {
         board->timer = Timer_Install(0, Board_handleTimer, 100);
         Timer_Start(board->timer);
 
-        // regenerate everything while first click is a mine or not a zero tile
-        // (we want to be generous here, don't just give the player one tile)
-        // this is pretty scary i hope it doesnt leak memory
-        while (*cell == (kTileTypeMine | COVER_TILE_BIT) || *cell != (kTileTypeZero | COVER_TILE_BIT)) {
-            Board* newBoard = sys_malloc(sizeof(Board));
-            Board_create(newBoard, board->width, board->height, board->mines, /* fake */ true);
-
-            sys_free(board->data);
-            board->data = newBoard->data;
-            sys_free(newBoard); // does not free newboard->data! that's what Board_free does!
-
-            cell = Board_getCell(board, row, col);
-        }
+        // Generate once with a guaranteed safe first cell. If the board has
+        // room, its eight neighbours are safe too, making the first cell zero.
+        Board* newBoard = sys_malloc(sizeof(Board));
+        Board_createSafe(newBoard, board->width, board->height, board->mines, /* fake */ true, row, col);
+        sys_free(board->data);
+        board->data = newBoard->data;
+        board->mines = newBoard->mines;
+        sys_free(newBoard); // keep its data, now owned by board
+        cell = Board_getCell(board, row, col);
     }
 
     // if it's not covered, count surrounding mines
@@ -458,11 +495,17 @@ void Board_kablooey(Board* board) {
 }
 
 void Board_onGameComplete(Board* board, bool won) {
-    if (won) board->won = true;
+    if (won) {
+        board->won = true;
+        board->newPersonalBest = PersonalBest_record(board->width, board->height, board->mines, board->centiseconds);
+    }
     else     board->lost = true;
     board->endTicks = RTC_GetTicks();
-    Timer_Stop(board->timer);
-    Timer_Deinstall(board->timer);
+    if (board->timer >= 0) {
+        Timer_Stop(board->timer);
+        Timer_Deinstall(board->timer);
+        board->timer = -1;
+    }
 }
 
 // will reveal all surrounding tiles that aren't covered

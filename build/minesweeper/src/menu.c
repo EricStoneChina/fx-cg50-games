@@ -1,11 +1,13 @@
 #include "menu.h"
 #include "utils.h"
+#include "personal_best.h"
 #include <fxcg/keyboard.h>
 #include <fxcg/heap.h>
 #include <fxcg/misc.h>
 #include <fxcg/rtc.h>
 
 void Menu_create(Menu* menu) {
+    PersonalBest_load();
     menu->width = BOARD_MAX_WIDTH;
     menu->height = BOARD_MAX_HEIGHT;
     menu->mines = 10;
@@ -77,7 +79,22 @@ void Menu_draw(Menu* menu) {
         PrintMini(&x, &y, "%)", TEXT_MODE_TRANSPARENT_BACKGROUND, 0xffffffff, 0, 0, COLOR_BLACK, COLOR_WHITE, true, 0);
     }
 
-    PrintCXY(LCD_WIDTH_PX / 2 - 72, LCD_HEIGHT_PX - 80, "Continue", TEXT_MODE_TRANSPARENT_BACKGROUND, -1, COLOR_BLACK, COLOR_WHITE, true, 0);
+    int best = PersonalBest_get(menu->width, menu->height, menu->mines);
+    x = 24;
+    y = 128;
+    PrintMini(&x, &y, "Personal Best: ", TEXT_MODE_TRANSPARENT_BACKGROUND, 0xffffffff, 0, 0, COLOR_BLACK, COLOR_WHITE, true, 0);
+    if (best > 0) {
+        Utils_clearAndFillBuffer(buf, best / 10);
+        PrintMini(&x, &y, (const char*)buf, TEXT_MODE_TRANSPARENT_BACKGROUND, 0xffffffff, 0, 0, COLOR_NAVY, COLOR_WHITE, true, 0);
+        PrintMini(&x, &y, ".", TEXT_MODE_TRANSPARENT_BACKGROUND, 0xffffffff, 0, 0, COLOR_BLACK, COLOR_WHITE, true, 0);
+        Utils_clearAndFillBuffer(buf, best % 10);
+        PrintMini(&x, &y, (const char*)buf, TEXT_MODE_TRANSPARENT_BACKGROUND, 0xffffffff, 0, 0, COLOR_NAVY, COLOR_WHITE, true, 0);
+        PrintMini(&x, &y, "s", TEXT_MODE_TRANSPARENT_BACKGROUND, 0xffffffff, 0, 0, COLOR_BLACK, COLOR_WHITE, true, 0);
+    } else {
+        PrintMini(&x, &y, "--", TEXT_MODE_TRANSPARENT_BACKGROUND, 0xffffffff, 0, 0, COLOR_NAVY, COLOR_WHITE, true, 0);
+    }
+
+    PrintCXY(LCD_WIDTH_PX / 2 - 72, LCD_HEIGHT_PX - 40, "Continue", TEXT_MODE_TRANSPARENT_BACKGROUND, -1, COLOR_BLACK, COLOR_WHITE, true, 0);
 
     if (menu->settingRow != 3) {
         // calculator cursor position
@@ -91,7 +108,7 @@ void Menu_draw(Menu* menu) {
         );
     } else {
         int x = LCD_WIDTH_PX / 2 - 72;
-        int y = LCD_HEIGHT_PX - 80;
+        int y = LCD_HEIGHT_PX - 40;
 
         Bdisp_Rectangle(
             x - 4, y - 4,
