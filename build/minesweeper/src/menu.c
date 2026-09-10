@@ -95,7 +95,8 @@ void Menu_draw(Menu* menu) {
     }
 
     int continueX = LCD_WIDTH_PX / 2 - (8 * charWidth) / 2;
-    int continueY = LCD_HEIGHT_PX - 32;
+    // Keep the button below the PB line but well inside the 216 px display.
+    int continueY = LCD_HEIGHT_PX - 56;
     PrintMini(&continueX, &continueY, "Continue", TEXT_MODE_TRANSPARENT_BACKGROUND, 0xffffffff, 0, 0, COLOR_BLACK, COLOR_WHITE, true, 0);
 
     if (menu->settingRow != 3) {
@@ -110,7 +111,7 @@ void Menu_draw(Menu* menu) {
         );
     } else {
         int x = LCD_WIDTH_PX / 2 - (8 * charWidth) / 2;
-        int y = LCD_HEIGHT_PX - 32;
+        int y = LCD_HEIGHT_PX - 56;
 
         Bdisp_Rectangle(
             x - 4, y - 4,
