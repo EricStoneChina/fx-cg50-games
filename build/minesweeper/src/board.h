@@ -33,6 +33,10 @@ typedef struct {
     int endTopAnimTicks;
     bool endTopAnimTimeShowing;
 
+    int highlightRow;
+    int highlightCol;
+    int highlightTicks;
+
     int konamiCodeIndex;
 } Board;
 

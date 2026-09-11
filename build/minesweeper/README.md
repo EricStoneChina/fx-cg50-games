@@ -2,7 +2,7 @@
 
 Minesweeper for the CASIO FX-CG50/Prizm (and similar calculators - if it can take a .g3a it can probably run it!)
 
-Press F1 to flag and F6 to reveal the cell, though everything should be self-explanatory.
+Press F1/Alpha to flag and F6/Shift to reveal a cell. Revealing an already-open number performs a standard chord: matching flag counts reveal the remaining neighbours; otherwise the possible mine neighbours are briefly highlighted.
 
 This also uses no float calculations (as in float\*float=float, int\*float=int calculations do exist. Though I'm sure float\*float=float is supported by the calculator I don't actually entirely trust the calculator to calculate them!), although sometimes code quality is sacrificed I'm in too deep now to uhh go back I guess.
 

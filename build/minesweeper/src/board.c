@@ -11,6 +11,8 @@
 // used in the timer
 Board* globalBoard;
 
+void _drawHighlight(Board* board, int row, int col, void* data);
+
 void _incrementMineCount(Board* board, int row, int col, void* mineCount) {
     if (*Board_getCell(board, row, col) == (kTileTypeMine | COVER_TILE_BIT)) {
         (*(char*)mineCount)++;
@@ -44,6 +46,10 @@ static void Board_createInternal(Board* board, int width, int height, int mines,
     board->endTicks = -1;
     board->endTopAnimTicks = -1;
     board->endTopAnimTimeShowing = true;
+
+    board->highlightRow = -1;
+    board->highlightCol = -1;
+    board->highlightTicks = -1;
 
     board->timer = -1;
     board->centiseconds = 0;
@@ -136,6 +142,16 @@ void Board_draw(Board* board) {
             if (x < -24 || y < -24 || x > LCD_WIDTH_PX || y > LCD_HEIGHT_PX) continue;
 
             Utils_drawSpriteAtPos(*Board_getCell(board, row, col), x, y);
+        }
+    }
+
+    // A failed chord attempt briefly marks the covered, unflagged neighbours
+    // so the player can see which cells may still contain mines.
+    if (board->highlightTicks >= 0) {
+        if (RTC_Elapsed_ms(board->highlightTicks, 900)) {
+            board->highlightTicks = -1;
+        } else {
+            Board_runForSurroundingCells(board, board->highlightRow, board->highlightCol, _drawHighlight, 0x0);
         }
     }
 
@@ -292,6 +308,8 @@ bool Board_handleKeypress(Board* board, int key) {
 
     if (board->won || board->lost) return false;
 
+    if (key) board->highlightTicks = -1;
+
     if (key == code[board->konamiCodeIndex]) {
         board->konamiCodeIndex++;
 
@@ -411,7 +429,25 @@ void _incrementFlagCount(Board* board, int row, int col, void* flagCount) {
     }
 }
 
+void _drawHighlight(Board* board, int row, int col, void* _unused) {
+    char* cell = Board_getCell(board, row, col);
+    if (!Board_cellIsCovered(cell) || Board_cellIsFlagged(cell)) return;
+
+    int x = 24 * col + board->offsetX + board->shakeX;
+    int y = 24 * row + board->offsetY + board->shakeY;
+    if (x < -24 || y < -24 || x > LCD_WIDTH_PX || y > LCD_HEIGHT_PX) return;
+
+    Bdisp_Rectangle(x + 1, y + 1, x + 23, y + 23, TEXT_COLOR_YELLOW);
+}
+
+void _highlightSurroundingCells(Board* board, int row, int col) {
+    board->highlightRow = row;
+    board->highlightCol = col;
+    board->highlightTicks = RTC_GetTicks();
+}
+
 void Board_revealSingleCell(Board* board, int row, int col, bool force) {
+    board->highlightTicks = -1;
     char* cell = Board_getCell(board, row, col);
 
     if (board->firstReveal) {
@@ -432,14 +468,18 @@ void Board_revealSingleCell(Board* board, int row, int col, bool force) {
         cell = Board_getCell(board, row, col);
     }
 
-    // if it's not covered, count surrounding mines
-    // then if it's equal to the value on the tile, auto reveal non-flagged cells
-    if (!Board_cellIsCovered(cell) && *cell != kTileTypeZero) {
+    // If it's not covered, use the standard Minesweeper chord action: when the
+    // flag count matches the number, reveal the remaining covered neighbours.
+    // Otherwise show those possible mine cells briefly instead of doing
+    // nothing, so a mistaken or incomplete flag count is visible to the player.
+    if (!Board_cellIsCovered(cell)) {
         char flagCount = 0;
         Board_runForSurroundingCells(board, row, col, _incrementFlagCount, &flagCount);
 
         if (*cell == flagCount) {
             Board_runForSurroundingCells(board, row, col, _revealCellIfNotFlagged, 0x0);
+        } else {
+            _highlightSurroundingCells(board, row, col);
         }
 
         return;
