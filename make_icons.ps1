@@ -2,8 +2,8 @@
 #  Generate official-style fx-CG50 game icons.
 #
 #  Every output is a 92x64, 24bpp RGB, uncompressed BMP. The unselected image
-#  has a white outer canvas; the selected image adds a cyan highlight behind
-#  the coloured tile while keeping the outer canvas white.
+#  has a white outer canvas; the selected image uses the official cyan rounded
+#  selection canvas, with white rounded corners.
 #  The coloured rounded tile stays in the top 38 pixels so the calculator can
 #  use the lower area for its menu label.
 #
@@ -29,11 +29,11 @@ function New-LinearBrush([single]$x1, [single]$y1, [single]$x2, [single]$y2, [Sy
     return New-Object System.Drawing.Drawing2D.LinearGradientBrush($p1, $p2, $top, $bottom)
 }
 
-function Draw-SelectedHighlight([System.Drawing.Graphics]$g) {
-    # Keep the white outer canvas. This cyan plate is only a selection halo
-    # around the coloured tile, not a full-screen background.
-    $path = New-RoundRectPath 2 3 86 42 11
-    $brush = New-LinearBrush 2 3 88 45 `
+function Draw-SelectedCanvas([System.Drawing.Graphics]$g) {
+    # The official selected icon uses a cyan rounded canvas behind the tile.
+    # Its rounded corners leave the outermost corner pixels white.
+    $path = New-RoundRectPath 0 0 92 64 7
+    $brush = New-LinearBrush 0 0 92 64 `
         ([System.Drawing.Color]::FromArgb(0x63, 0xD9, 0xFF)) `
         ([System.Drawing.Color]::FromArgb(0x29, 0xBE, 0xFF))
     $g.FillPath($brush, $path)
@@ -130,7 +130,7 @@ function New-GameIcon([string]$path, [string]$mode, [string]$theme) {
     $g.PixelOffsetMode = [System.Drawing.Drawing2D.PixelOffsetMode]::HighQuality
 
     $g.Clear([System.Drawing.Color]::White)
-    if ($mode -eq 'sel') { Draw-SelectedHighlight $g }
+    if ($mode -eq 'sel') { Draw-SelectedCanvas $g }
     Draw-GameTile $g $theme
     if ($theme -eq '2048') { Draw-2048Subject $g } else { Draw-MineSubject $g }
 
