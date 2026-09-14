@@ -8,10 +8,15 @@
 #include <fxcg/misc.h>
 #include <fxcg/system.h>
 
-// used in the timer
-Board* globalBoard;
-
 void _drawHighlight(Board* board, int row, int col, void* data);
+
+static void Board_updateElapsedTime(Board* board) {
+    if (board->firstReveal || board->won || board->lost || board->timerStartTicks < 0) return;
+
+    // RTC ticks run at 128 Hz. Unsigned subtraction also handles tick wraparound.
+    unsigned int elapsedTicks = (unsigned int)RTC_GetTicks() - (unsigned int)board->timerStartTicks;
+    board->centiseconds = (int)((elapsedTicks * 10u) / 128u);
+}
 
 void _incrementMineCount(Board* board, int row, int col, void* mineCount) {
     if (*Board_getCell(board, row, col) == (kTileTypeMine | COVER_TILE_BIT)) {
@@ -51,7 +56,7 @@ static void Board_createInternal(Board* board, int width, int height, int mines,
     board->highlightCol = -1;
     board->highlightTicks = -1;
 
-    board->timer = -1;
+    board->timerStartTicks = -1;
     board->centiseconds = 0;
 
     board->konamiCodeIndex = 0;
@@ -110,7 +115,6 @@ static void Board_createInternal(Board* board, int width, int height, int mines,
         }
     }
 
-    if (!fake) globalBoard = board;
 }
 
 void Board_create(Board* board, int width, int height, int mines, bool fake) {
@@ -122,14 +126,8 @@ void Board_createSafe(Board* board, int width, int height, int mines, bool fake,
 }
 
 void Board_free(Board* board) {
-    if (board->timer >= 0) {
-        Timer_Stop(board->timer);
-        Timer_Deinstall(board->timer);
-        board->timer = -1;
-    }
     sys_free(board->data);
     sys_free(board);
-    globalBoard = 0x0;
 }
 
 void Board_draw(Board* board) {
@@ -174,6 +172,7 @@ void Board_draw(Board* board) {
 }
 
 void Board_drawStatusArea(Board* board) {
+    Board_updateElapsedTime(board);
     int x = 24;
     int y = 2;
 
@@ -454,8 +453,7 @@ void Board_revealSingleCell(Board* board, int row, int col, bool force) {
         // oooh exciting exciting
         board->firstReveal = false;
 
-        board->timer = Timer_Install(0, Board_handleTimer, 100);
-        Timer_Start(board->timer);
+        board->timerStartTicks = RTC_GetTicks();
 
         // Generate once with a guaranteed safe first cell. If the board has
         // room, its eight neighbours are safe too, making the first cell zero.
@@ -535,17 +533,16 @@ void Board_kablooey(Board* board) {
 }
 
 void Board_onGameComplete(Board* board, bool won) {
+    // Freeze elapsed time before any file I/O. The old hardware timer could
+    // remain registered after the add-in returned, making the OS call an
+    // unmapped callback address and causing a TLB ERROR.
+    Board_updateElapsedTime(board);
     if (won) {
         board->won = true;
         board->newPersonalBest = PersonalBest_record(board->width, board->height, board->mines, board->centiseconds);
     }
     else     board->lost = true;
     board->endTicks = RTC_GetTicks();
-    if (board->timer >= 0) {
-        Timer_Stop(board->timer);
-        Timer_Deinstall(board->timer);
-        board->timer = -1;
-    }
 }
 
 // will reveal all surrounding tiles that aren't covered
@@ -605,8 +602,4 @@ void Board_checkWinCondition(Board* board) {
 
 char* Board_getCell(Board* board, int row, int col) {
     return &board->data[row*board->width + col];
-}
-
-void Board_handleTimer() {
-    globalBoard->centiseconds++;
 }

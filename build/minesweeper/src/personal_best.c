@@ -60,7 +60,16 @@ void PersonalBest_load(void) {
     }
 }
 
-static void PersonalBest_save(void) {
+static bool PersonalBest_equal(const PersonalBestData* left, const PersonalBestData* right) {
+    const unsigned char* a = (const unsigned char*)left;
+    const unsigned char* b = (const unsigned char*)right;
+    for (unsigned int i = 0; i < sizeof(PersonalBestData); i++) {
+        if (a[i] != b[i]) return false;
+    }
+    return true;
+}
+
+static bool PersonalBest_save(void) {
     unsigned short path[32];
     PersonalBest_path(path);
 
@@ -73,14 +82,26 @@ static void PersonalBest_save(void) {
 
     if (handle < 0) {
         size_t size = sizeof(PersonalBestData);
-        Bfile_CreateEntry_OS(path, CREATEMODE_FILE, &size);
+        if (Bfile_CreateEntry_OS(path, CREATEMODE_FILE, &size) < 0) return false;
         handle = Bfile_OpenFile_OS(path, READWRITE, 0);
     }
 
-    if (handle < 0) return;
-    Bfile_SeekFile_OS(handle, 0);
-    Bfile_WriteFile_OS(handle, &data, sizeof(PersonalBestData));
+    if (handle < 0) return false;
+    if (Bfile_SeekFile_OS(handle, 0) < 0 ||
+        Bfile_WriteFile_OS(handle, &data, sizeof(PersonalBestData)) < 0) {
+        Bfile_CloseFile_OS(handle);
+        return false;
+    }
     Bfile_CloseFile_OS(handle);
+
+    // A successful syscall is not enough: reopen and verify the complete file
+    // before reporting NEW PB to the player.
+    PersonalBestData verify;
+    handle = Bfile_OpenFile_OS(path, READ, 0);
+    if (handle < 0) return false;
+    int result = Bfile_ReadFile_OS(handle, &verify, sizeof(PersonalBestData), 0);
+    Bfile_CloseFile_OS(handle);
+    return result >= 0 && PersonalBest_equal(&data, &verify);
 }
 
 int PersonalBest_get(int width, int height, int mines) {
@@ -104,20 +125,24 @@ bool PersonalBest_record(int width, int height, int mines, int deciseconds) {
         PersonalBestRecord* record = &data.records[i];
         if (record->width == width && record->height == height && record->mines == mines) {
             if (record->deciseconds != 0 && record->deciseconds <= (unsigned int)deciseconds) return false;
+            unsigned int previous = record->deciseconds;
             record->deciseconds = deciseconds;
-            PersonalBest_save();
-            return true;
+            if (PersonalBest_save()) return true;
+            record->deciseconds = previous;
+            return false;
         }
         if (empty < 0 && record->width == 0) empty = i;
         if (record->deciseconds > data.records[slowest].deciseconds) slowest = i;
     }
 
     int index = empty >= 0 ? empty : slowest;
+    PersonalBestRecord previous = data.records[index];
     data.records[index].width = width;
     data.records[index].height = height;
     data.records[index].mines = mines;
     data.records[index].reserved = 0;
     data.records[index].deciseconds = deciseconds;
-    PersonalBest_save();
-    return true;
+    if (PersonalBest_save()) return true;
+    data.records[index] = previous;
+    return false;
 }

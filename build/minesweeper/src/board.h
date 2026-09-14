@@ -25,7 +25,7 @@ typedef struct {
 
     bool firstReveal;
 
-    int timer;
+    int timerStartTicks;
     int centiseconds;
 
     int startTicks;
@@ -68,5 +68,3 @@ bool Board_cellIsFlagged(char* cell);
 bool Board_cellIsCovered(char* cell);
 
 char* Board_getCell(Board* board, int row, int col);
-
-void Board_handleTimer();
