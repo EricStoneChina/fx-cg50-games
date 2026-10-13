@@ -21,6 +21,7 @@ typedef struct {
 
 static PersonalBestData data;
 static bool loaded = false;
+static bool dirty = false;
 
 static void PersonalBest_clear(void) {
     data.magic = PERSONAL_BEST_MAGIC;
@@ -41,6 +42,7 @@ static void PersonalBest_path(unsigned short* path) {
 void PersonalBest_load(void) {
     if (loaded) return;
     loaded = true;
+    dirty = false;
     PersonalBest_clear();
 
     unsigned short path[32];
@@ -60,15 +62,9 @@ void PersonalBest_load(void) {
     }
 }
 
-static bool PersonalBest_equal(const PersonalBestData* left, const PersonalBestData* right) {
-    const unsigned char* a = (const unsigned char*)left;
-    const unsigned char* b = (const unsigned char*)right;
-    for (unsigned int i = 0; i < sizeof(PersonalBestData); i++) {
-        if (a[i] != b[i]) return false;
-    }
-    return true;
-}
-
+// Write-only save. No stack buffer, no reopen/verify: a full re-read needed a
+// ~1KB PersonalBestData on the stack and extra Bfile traffic, which combined
+// with reveal recursion caused TLB ERROR / hangs at game-complete time.
 static bool PersonalBest_save(void) {
     unsigned short path[32];
     PersonalBest_path(path);
@@ -93,15 +89,14 @@ static bool PersonalBest_save(void) {
         return false;
     }
     Bfile_CloseFile_OS(handle);
+    return true;
+}
 
-    // A successful syscall is not enough: reopen and verify the complete file
-    // before reporting NEW PB to the player.
-    PersonalBestData verify;
-    handle = Bfile_OpenFile_OS(path, READ, 0);
-    if (handle < 0) return false;
-    int result = Bfile_ReadFile_OS(handle, &verify, sizeof(PersonalBestData), 0);
-    Bfile_CloseFile_OS(handle);
-    return result >= 0 && PersonalBest_equal(&data, &verify);
+bool PersonalBest_flush(void) {
+    if (!dirty) return true;
+    // One-shot: never retry Bfile every frame (that can hang the OS).
+    dirty = false;
+    return PersonalBest_save();
 }
 
 int PersonalBest_get(int width, int height, int mines) {
@@ -125,24 +120,20 @@ bool PersonalBest_record(int width, int height, int mines, int deciseconds) {
         PersonalBestRecord* record = &data.records[i];
         if (record->width == width && record->height == height && record->mines == mines) {
             if (record->deciseconds != 0 && record->deciseconds <= (unsigned int)deciseconds) return false;
-            unsigned int previous = record->deciseconds;
             record->deciseconds = deciseconds;
-            if (PersonalBest_save()) return true;
-            record->deciseconds = previous;
-            return false;
+            dirty = true;
+            return true;
         }
         if (empty < 0 && record->width == 0) empty = i;
         if (record->deciseconds > data.records[slowest].deciseconds) slowest = i;
     }
 
     int index = empty >= 0 ? empty : slowest;
-    PersonalBestRecord previous = data.records[index];
     data.records[index].width = width;
     data.records[index].height = height;
     data.records[index].mines = mines;
     data.records[index].reserved = 0;
     data.records[index].deciseconds = deciseconds;
-    if (PersonalBest_save()) return true;
-    data.records[index] = previous;
-    return false;
+    dirty = true;
+    return true;
 }

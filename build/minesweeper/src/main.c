@@ -1,6 +1,7 @@
 #include "menu.h"
 #include "utils.h"
 #include "keyboard.h"
+#include "personal_best.h"
 #include <fxcg/display.h>
 #include <fxcg/keyboard.h>
 #include <fxcg/heap.h>
@@ -44,6 +45,9 @@ int main() {
         Menu_drawStatusArea(menu);
 
         Bdisp_PutDisp_DD();
+
+        // PB write happens here, outside reveal recursion / chord callbacks.
+        PersonalBest_flush();
 
         // TODO: make this better
         if (Key_pressed() == KEY_PRGM_MENU) break;

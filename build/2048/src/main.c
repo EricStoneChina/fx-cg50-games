@@ -1,45 +1,200 @@
 /*
-    Copyright (C) 2019  wjtje (Wouter van der Wal)
-
-    This program is free software: you can redistribute it and/or modify
-    it under the terms of the GNU Affero General Public License as published
-    by the Free Software Foundation, either version 3 of the License, or
-    (at your option) any later version.
-
-    This program is distributed in the hope that it will be useful,
-    but WITHOUT ANY WARRANTY; without even the implied warranty of
-    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-    GNU Affero General Public License for more details.
-
-    You should have received a copy of the GNU Affero General Public License
-    along with this program.  If not, see <https://www.gnu.org/licenses/>.
-
+ * 2048 for Casio fx-CG50 (Prizm)
+ *
+ * Rebuilt to follow the official 2048 rules, using Gabriele Cirulli's
+ * reference implementation (gabrielecirulli/2048, js/game_manager.js):
+ *   - one key press = exactly one move: tiles slide as far as possible in
+ *     the chosen direction and a tile created by a merge cannot merge again
+ *     within the same move (no cascades);
+ *   - a new tile (2 @ 90% / 4 @ 10%) spawns only after the board changed;
+ *   - each merge adds the merged value to the score;
+ *   - reaching 2048 shows the win overlay; the next arrow press keeps going;
+ *   - game over only when there is no empty cell AND no mergeable pair;
+ *   - the game autosaves to \fls0\G2048.DAT while the player pauses and on
+ *     exit, and is restored on startup; the best score survives restarts
+ *     and game overs.
+ *
+ * Original Casio port: wjtje/2048-fx-cg-10-20-50 (AGPL v3).
  */
 
 #include <fxcg/display.h>
 #include <fxcg/keyboard.h>
 #include <fxcg/rtc.h>
-#include <fxcg/misc.h>
-#include "sprite.h"
-#include "color.h"
-#include <string.h>
+#include <fxcg/file.h>
 #include <stdlib.h>
-#include <stdio.h>
+#include <stdbool.h>
+#include "sprite.h"
 
-// vars
-int key; // Keyboard memory
-int board[4][4] = { // x and y are swaped
-  {0, 0, 0, 0},
-  {0, 0, 0, 0},
-  {0, 0, 0, 0},
-  {0, 0, 0, 0}
+/* ------------------------------------------------------------------ */
+/* Palette (RGB565, official 2048 colours)                             */
+/* ------------------------------------------------------------------ */
+#define PAGE_BG    0xe6fa /* matches the logo sprite background */
+#define BOARD_BG   0xbd74 /* official #bbada0 */
+#define CELL_EMPTY 0xce16 /* official #cdc1b4 */
+#define TEXT_DARK  0x736c /* official #776e65 */
+#define TEXT_LIGHT 0xffff
+
+/* Two palettes. The official colours make 2 and 4 nearly identical on this
+   LCD, so VIVID (the default) separates consecutive values clearly. */
+static const color_t tileColorClassic[12] = {
+    0xef3b, 0xef19, 0xf58f, 0xf4ac, 0xf3eb, 0xf2e7,
+    0xee6e, 0xee6c, 0xee4a, 0xee27, 0xee05, 0x39c6
 };
-int score = 0;
-const color_t tileColor[12] = {0xef3b,0xef19,0xf58f,0xf4ac,0xf3eb,0xf2e7,0xee6e,0xee6c,0xee4a,0xee27,0xee05,0x39c6};
-const color_t textColor[12] = {0x5aca,0x5aca,0xffbe,0xffbe,0xffbe,0xffbe,0xffbe,0xffbe,0xffbe,0xffbe,0xffbe,0xffbe};
+static const color_t tileColorVivid[12] = {
+    0xf79c, 0xdd4b, 0xf467, 0xe325, 0xd1c5, 0xb123,
+    0x8a35, 0x69d6, 0x3a96, 0x1c58, 0x1513, 0x29ea
+};
+/* 2 and 4 are light tiles and keep dark text in both palettes */
+static const color_t tileTextColor[12] = {
+    TEXT_DARK, TEXT_DARK, TEXT_LIGHT, TEXT_LIGHT, TEXT_LIGHT, TEXT_LIGHT,
+    TEXT_LIGHT, TEXT_LIGHT, TEXT_LIGHT, TEXT_LIGHT, TEXT_LIGHT, TEXT_LIGHT
+};
 
-// Sprites
-const color_t logo[9280] = {
+/* Persisted options, packed into SaveState.settings. */
+#define OPT_VIVID         (1u << 0) /* 1 = vivid palette, 0 = official classic */
+#define OPT_HOLD_REPEAT   (1u << 1) /* 1 = holding an arrow repeats the move   */
+#define OPT_AUTOSAVE_EXIT (1u << 2) /* 1 = save only on exit / game end        */
+#define OPT_CONFIRM_NEW   (1u << 3) /* 1 = SHIFT asks before wiping the game   */
+#define OPT_DEFAULT       (OPT_VIVID | OPT_CONFIRM_NEW)
+
+static unsigned int options = OPT_DEFAULT;
+
+static const color_t* tileColorTable(void) {
+    return (options & OPT_VIVID) ? tileColorVivid : tileColorClassic;
+}
+
+/* ------------------------------------------------------------------ */
+/* Game state                                                          */
+/* ------------------------------------------------------------------ */
+static int board[4][4];
+static int score;
+static int best;
+static bool won;         /* a 2048 tile has been created */
+static bool keepPlaying; /* win overlay dismissed, game continues */
+static bool over;
+
+/* One-step undo (the official game keeps a single undo step). A snapshot is
+   committed before every accepted move, and undoing also revives a board
+   that just ended the game. */
+static int undoBoard[4][4];
+static int undoScore;
+static bool undoWon;
+static bool undoKeepPlaying;
+static bool undoAvailable;
+static bool toastActive;     /* a transient message is on the board */
+static unsigned int toastTicks;
+
+/* Save bookkeeping. Bfile writes trigger flash storage optimisation and show
+   the OS busy cursor, so they must stay rare (see the minesweeper
+   PersonalBest_flush notes: retrying Bfile every frame can hang the OS). */
+static bool dirty;       /* RAM state newer than the last successful save */
+static bool saveBroken;  /* a save failed: stop retrying during play */
+static int movesSinceSave;
+
+/* Cadence: during play the file is written only while the player pauses to
+   think, never right after a move. RTC ticks are 128 Hz on this hardware. */
+#define IDLE_SAVE_TICKS     256 /* ~2 s without input -> save */
+#define RESTORE_GRACE_TICKS 96  /* ~0.75 s: a held key skips the restore */
+#define MOVE_SAVE_LIMIT     50  /* bounded-loss checkpoint if never pausing */
+#define HOLD_REPEAT_TICKS   24  /* ~190 ms between repeats while a key is held */
+#define TOAST_TICKS         256 /* ~2 s before a transient message is erased */
+
+/* ------------------------------------------------------------------ */
+/* Drawing primitives                                                  */
+/* ------------------------------------------------------------------ */
+static void fillRect(int x, int y, int w, int h, color_t col) {
+    if (x < 0 || y < 0 || x + w > LCD_WIDTH_PX || y + h > LCD_HEIGHT_PX) return;
+    color_t* s = VRAM_ADDR;
+    s += y * LCD_WIDTH_PX + x;
+    while (h-- > 0) {
+        for (int i = 0; i < w; i++) s[i] = col;
+        s += LCD_WIDTH_PX;
+    }
+}
+
+/* Filled rectangle with its four 2x2 corners trimmed: the closest thing to
+   the official rounded tiles at this resolution. */
+static void panel(int x, int y, int w, int h, color_t fill, color_t around) {
+    fillRect(x, y, w, h, fill);
+    fillRect(x, y, 2, 2, around);
+    fillRect(x + w - 2, y, 2, 2, around);
+    fillRect(x, y + h - 2, 2, 2, around);
+    fillRect(x + w - 2, y + h - 2, 2, 2, around);
+}
+
+/* The LCD only shows what we push to it, so every redraw ends with a
+   display update (the same pattern as the minesweeper main loop). */
+static void present(void) {
+    Bdisp_PutDisp_DD();
+}
+
+/* ------------------------------------------------------------------ */
+/* Tiny 3x5 font: A-Z, 0-9, '!', ':', '-', '+', '.'                    */
+/* Each glyph = 5 rows, 3 bits per row (bit2 = left pixel).            */
+/* ------------------------------------------------------------------ */
+static const unsigned char FONT3x5[41][5] = {
+    /* A-Z */
+    {2, 5, 7, 5, 5}, {6, 5, 6, 5, 6}, {3, 4, 4, 4, 3}, {6, 5, 5, 5, 6},
+    {7, 4, 6, 4, 7}, {7, 4, 6, 4, 4}, {3, 4, 5, 5, 3}, {5, 5, 7, 5, 5},
+    {7, 2, 2, 2, 7}, {1, 1, 1, 5, 2}, {5, 6, 4, 6, 5}, {4, 4, 4, 4, 7},
+    {5, 7, 7, 5, 5}, {6, 5, 5, 5, 5}, {7, 5, 5, 5, 7}, {7, 5, 7, 4, 4},
+    {7, 5, 5, 7, 1}, {7, 5, 6, 5, 5}, {3, 4, 2, 1, 6}, {7, 2, 2, 2, 2},
+    {5, 5, 5, 5, 7}, {5, 5, 5, 5, 2}, {5, 5, 7, 7, 5}, {5, 5, 2, 5, 5},
+    {5, 5, 2, 2, 2}, {7, 1, 2, 4, 7},
+    /* 0-9 */
+    {7, 5, 5, 5, 7}, {2, 6, 2, 2, 7}, {7, 1, 7, 4, 7}, {7, 1, 3, 1, 7},
+    {5, 5, 7, 1, 1}, {7, 4, 7, 1, 7}, {7, 4, 7, 5, 7}, {7, 1, 1, 2, 2},
+    {7, 5, 7, 5, 7}, {7, 5, 7, 1, 7},
+    /* ! : - + . */
+    {2, 2, 2, 0, 2}, {0, 2, 0, 2, 0}, {0, 0, 7, 0, 0}, {0, 2, 7, 2, 0},
+    {0, 0, 0, 0, 2}
+};
+
+static const unsigned char* glyphFor(char c) {
+    if (c >= 'A' && c <= 'Z') return FONT3x5[c - 'A'];
+    if (c >= '0' && c <= '9') return FONT3x5[26 + (c - '0')];
+    switch (c) {
+        case '!': return FONT3x5[36];
+        case ':': return FONT3x5[37];
+        case '-': return FONT3x5[38];
+        case '+': return FONT3x5[39];
+        case '.': return FONT3x5[40];
+    }
+    return 0; /* space or unknown -> blank */
+}
+
+static int textWidth(const char* s, int scale) {
+    int n = 0;
+    while (s[n] != '\0') n++;
+    if (n == 0) return 0;
+    return n * 4 * scale - scale;
+}
+
+static void drawText(int x, int y, const char* s, int scale, color_t fg) {
+    for (int i = 0; s[i] != '\0'; i++) {
+        const unsigned char* g = glyphFor(s[i]);
+        if (g != 0) {
+            for (int row = 0; row < 5; row++) {
+                unsigned char bits = g[row];
+                for (int c = 0; c < 3; c++) {
+                    if (bits & (4 >> c)) {
+                        fillRect(x + c * scale, y + row * scale, scale, scale, fg);
+                    }
+                }
+            }
+        }
+        x += 4 * scale;
+    }
+}
+
+static void drawTextCentered(int boxX, int boxW, int y, const char* s, int scale, color_t fg) {
+    drawText(boxX + (boxW - textWidth(s, scale)) / 2, y, s, scale, fg);
+}
+
+/* ------------------------------------------------------------------ */
+/* Logo sprite (80x58, background == PAGE_BG)                          */
+/* ------------------------------------------------------------------ */
+static const color_t logo[9280] = {
   0xe6fa,0xe6fa,0xe6fa,0xe6fa,0xe6fa,0xe6fa,0xe6fa,0xe6fa,0xe6fa,0xe6fa,0xe6fa,0xe6fa,0xe6fa,0xe6fa,0xe6fa,0xe6fa,0xe6fa,0xe6fa,0xe6fa,0xe6fa,0xe6fa,0xe6fa,0xe6fa,0xe6fa,0xe6fa,0xe6fa,0xe6fa,0xe6fa,0xe6fa,0xe6fa,0xe6fa,0xe6fa,0xe6fa,0xe6fa,0xe6fa,0xe6fa,0xe6fa,0xe6fa,0xe6fa,0xe6fa,0xe6fa,0xe6fa,0xe6fa,0xe6fa,0xe6fa,0xe6fa,0xe6fa,0xe6fa,0xe6fa,0xe6fa,0xe6fa,0xe6fa,0xe6fa,0xe6fa,0xbdb5,0x8c0f,0x7bad,0x83ee,0xad33,0xe6fa,0xe6fa,0xe6fa,0xe6fa,0xe6fa,0xe6fa,0xe6fa,0xe6fa,0xe6fa,0xe6fa,0xe6fa,0xe6fa,0xe6fa,0xe6fa,0xe6fa,0xe6fa,0xe6fa,0xe6fa,0xe6fa,0xe6fa,0xe6fa,
   0xe6fa,0xe6fa,0xe6fa,0xe6fa,0xe6fa,0xe6fa,0xe6fa,0xbdb5,0x9470,0x7b8c,0x6b0a,0x5aa9,0x62ea,0x7b8c,0xa4b1,0xd637,0xe6fa,0xe6fa,0xe6fa,0xe6fa,0xe6fa,0xe6fa,0xe6fa,0xe6fa,0xe6fa,0xe6fa,0xe6fa,0xe6fa,0xe6fa,0xe6fa,0xe6fa,0xe6fa,0xe6fa,0xe6fa,0xe6fa,0xe6fa,0xe6fa,0xe6fa,0xe6fa,0xe6fa,0xe6fa,0xe6fa,0xe6fa,0xe6fa,0xe6fa,0xe6fa,0xe6fa,0xe6fa,0xe6fa,0xe6fa,0xe6fa,0xe6fa,0xe6fa,0xe6fa,0x734b,0x5a88,0x5a88,0x5a88,0x5a88,0xd657,0xe6fa,0xe6fa,0xe6fa,0xe6fa,0xe6fa,0xe6fa,0xe6fa,0xe6fa,0xe6fa,0xe6fa,0xe6fa,0xe6fa,0xe6fa,0xe6fa,0xe6fa,0xe6fa,0xe6fa,0xe6fa,0xe6fa,0xe6fa,
   0xe6fa,0xe6fa,0xe6fa,0xe6fa,0xe6fa,0xb553,0x6b2b,0x5a88,0x5a88,0x5a88,0x5a88,0x5a88,0x5a88,0x5a88,0x5a88,0x5a88,0x8c2f,0xd678,0xe6fa,0xe6fa,0xe6fa,0xe6fa,0xe6fa,0xe6fa,0xe6fa,0xe6fa,0xe6fa,0xe6fa,0xe6fa,0xe6fa,0xe6fa,0xe6fa,0xe6fa,0xe6fa,0xe6fa,0xe6fa,0xe6fa,0xe6fa,0xe6fa,0xe6fa,0xe6fa,0xe6fa,0xe6fa,0xe6fa,0xe6fa,0xe6fa,0xe6fa,0xe6fa,0xe6fa,0xe6fa,0xe6fa,0xe6fa,0xe6fa,0xe6fa,0x5aa9,0x5a88,0x5a88,0x5a88,0x5a88,0xc5d5,0xe6fa,0xe6fa,0xe6fa,0xe6fa,0xe6fa,0xe6fa,0xe6fa,0xe6fa,0xe6fa,0xe6fa,0xe6fa,0xe6fa,0xe6fa,0xe6fa,0xe6fa,0xe6fa,0xe6fa,0xe6fa,0xe6fa,0xe6fa,
@@ -100,319 +255,738 @@ const color_t logo[9280] = {
   0xe6fa,0xe6fa,0xe6fa,0xe6fa,0xe6fa,0xe6fa,0xe6fa,0xe6fa,0xe6fa,0xe6fa,0xe6fa,0xe6fa,0xe6fa,0xe6fa,0xe6fa,0xe6fa,0xe6fa,0xe6fa,0xe6fa,0xe6fa,0xe6fa,0xe6fa,0xe6fa,0xe6fa,0xe6fa,0xe6fa,0xe6fa,0xe6fa,0xd677,0xbdb5,0xb574,0xb553,0xbd94,0xc5f6,0xe6fa,0xe6fa,0xe6fa,0xe6fa,0xe6fa,0xe6fa,0xe6fa,0xe6fa,0xe6fa,0xe6fa,0xe6fa,0xe6fa,0xe6fa,0xe6fa,0xe6fa,0xe6fa,0xe6fa,0xe6fa,0xe6d9,0xdeb9,0xdeb9,0xe6fa,0xe6fa,0xe6fa,0xe6fa,0xe6fa,0xe6fa,0xe6fa,0xe6fa,0xe6fa,0xe6fa,0xe6f9,0xd678,0xc5f6,0xbd74,0xb574,0xc5f6,0xd677,0xe6d9,0xe6fa,0xe6fa,0xe6fa,0xe6fa,0xe6fa,0xe6fa,0xe6fa
 };
 
-// Custom function
-void fillArea(unsigned x,unsigned y,unsigned w,unsigned h,unsigned short col){
-	unsigned short*s=(unsigned short*)0xAC000000;
-	s+=(y*384)+x;
-	while(h--){
-		unsigned w2=w;
-		while(w2--)
-			*s++=col;
-		s+=384-w;
-	}
+/* ------------------------------------------------------------------ */
+/* Layout                                                              */
+/* ------------------------------------------------------------------ */
+#define CELL_SIZE  38
+#define CELL_PITCH 44
+#define BOARD_X 12
+#define BOARD_Y 26
+#define BOARD_SIZE (4 * CELL_SIZE + 5 * (CELL_PITCH - CELL_SIZE)) /* 182 */
+
+#define SCOREBOX_X 210
+#define SCOREBOX_Y 78
+#define SCOREBOX_W 82
+#define SCOREBOX_H 40
+#define BESTBOX_X  296
+
+static int cellX(int c) { return BOARD_X + (CELL_PITCH - CELL_SIZE) + c * CELL_PITCH; }
+static int cellY(int r) { return BOARD_Y + (CELL_PITCH - CELL_SIZE) + r * CELL_PITCH; }
+
+/* ------------------------------------------------------------------ */
+/* Small helpers                                                       */
+/* ------------------------------------------------------------------ */
+static int numToStr(int v, char* buf) {
+    char tmp[12];
+    int n = 0;
+    if (v <= 0) { buf[0] = '0'; buf[1] = '\0'; return 1; }
+    while (v > 0) { tmp[n++] = (char)('0' + v % 10); v /= 10; }
+    for (int i = 0; i < n; i++) buf[i] = tmp[n - 1 - i];
+    buf[n] = '\0';
+    return n;
 }
 
-void createTile(int x, int y, unsigned short col, int val, unsigned short colf) {
-  fillArea(1+x, 0+y, 34, 36, col);
-  fillArea(0+x, 1+y, 36, 34, col);
-
-  // Only write number in tile if it isn't 0
-  if (val != 0) {
-    char buffer[20];
-    itoa(val, buffer);
-    // Store values in int
-    // Number are 12px wide
-    int i;
-    for(i = 0; buffer[i] != '\0'; ++i); // Get length of string
-    int xa = x+18-(6*i); // Calculate the position of the string
-    int ya = y-13;
-    // Use a smaler font
-    PrintMini(&xa, &ya, buffer, 0x02, 0xffffffff, 0, 0, colf, col, 1, 0);
-  }
+static int colorIndexFor(int v) {
+    int i = 0;
+    while (v > 2 && i < 11) { v >>= 1; i++; }
+    return i;
 }
 
-int emptySpotsOnBoard() {
-  int xTile = 0;
-  int yTile = 0;
-  int empty = 0;
-  // Loop For checking each hole
-  while (xTile != 4) {
-    while (yTile != 4) {
-      if (board[yTile][xTile] == 0) {
-        empty = empty + 1;
-      }
-      yTile = yTile + 1;
+/* ------------------------------------------------------------------ */
+/* Drawing                                                             */
+/* ------------------------------------------------------------------ */
+/* Transient message drawn inside the bottom tile row so that a board repaint
+   erases every one of its pixels (nothing may sit in the grid gaps). The idle
+   loop clears it again after TOAST_TICKS even if no repaint happens. */
+static void showToast(const char* text) {
+    drawTextCentered(BOARD_X, BOARD_SIZE, 178, text, 2, TEXT_DARK);
+    toastActive = true;
+    toastTicks = RTC_GetTicks();
+    present();
+}
+
+/* Native 8x16 digit glyphs (classic bitmap proportions: 2 blank rows top and
+   bottom). Drawn 1:1 so strokes stay thin and shapes stay crisp - the earlier
+   scaled fonts were fatiguing to read. Each row: bit7 = left pixel. */
+static const unsigned char FONT8x16[10][16] = {
+    {0x00,0x00,0x3C,0x7E,0x66,0x66,0x66,0x66,0x66,0x66,0x66,0x66,0x7E,0x3C,0x00,0x00}, /* 0 */
+    {0x00,0x00,0x18,0x38,0x78,0x18,0x18,0x18,0x18,0x18,0x18,0x18,0x7E,0x7E,0x00,0x00}, /* 1 */
+    {0x00,0x00,0x3C,0x7E,0x66,0x06,0x06,0x0C,0x18,0x30,0x60,0x60,0x7E,0x7E,0x00,0x00}, /* 2 */
+    {0x00,0x00,0x3C,0x7E,0x06,0x06,0x1C,0x1C,0x06,0x06,0x06,0x66,0x7E,0x3C,0x00,0x00}, /* 3 */
+    {0x00,0x00,0x06,0x0E,0x1E,0x36,0x66,0xC6,0xC6,0x7E,0x06,0x06,0x06,0x06,0x00,0x00}, /* 4 */
+    {0x00,0x00,0x7E,0x7E,0x60,0x60,0x7C,0x7E,0x06,0x06,0x06,0x66,0x7E,0x3C,0x00,0x00}, /* 5 */
+    {0x00,0x00,0x3C,0x7E,0x66,0x60,0x60,0x7C,0x7E,0x66,0x66,0x66,0x7E,0x3C,0x00,0x00}, /* 6 */
+    {0x00,0x00,0x7E,0x7E,0x06,0x06,0x0C,0x0C,0x18,0x18,0x30,0x30,0x30,0x30,0x00,0x00}, /* 7 */
+    {0x00,0x00,0x3C,0x7E,0x66,0x66,0x3C,0x7E,0x66,0x66,0x66,0x66,0x7E,0x3C,0x00,0x00}, /* 8 */
+    {0x00,0x00,0x3C,0x7E,0x66,0x66,0x66,0x7E,0x3E,0x06,0x06,0x66,0x7E,0x3C,0x00,0x00}  /* 9 */
+};
+
+static void drawTileNumber(int x, int y, int v) {
+    char buf[12];
+    int n = numToStr(v, buf);
+    /* glyphs at 1:1 with a 1px gap; 4 digits still fit inside a 38px tile */
+    int pitch = 9;
+    int w = (n - 1) * pitch + 8;
+    int px = x + (CELL_SIZE - w) / 2;
+    int py = y + (CELL_SIZE - 16) / 2;
+    color_t fg = tileTextColor[colorIndexFor(v)];
+    for (int i = 0; i < n; i++) {
+        const unsigned char* g = FONT8x16[buf[i] - '0'];
+        for (int row = 0; row < 16; row++) {
+            unsigned char bits = g[row];
+            for (int col = 0; col < 8; col++) {
+                if (bits & (0x80 >> col)) {
+                    fillRect(px + i * pitch + col, py + row, 1, 1, fg);
+                }
+            }
+        }
     }
-    yTile = 0;
-    xTile = xTile + 1;
-  }
-
-  return empty;
 }
 
-void drawBackground() {
-  Bdisp_Fill_VRAM((int)0xe6fa, 3); // Fill the screen
-  DrawFrame((int)0xe6fa); // Fill the border
-  // Create inner area
-  fillArea(12, 12, 192, 192, 0x9c4f);
-  fillArea(13, 11, 190, 1, 0x9c4f);
-  fillArea(13, 204, 190, 1, 0x9c4f);
-  fillArea(11, 13, 1, 190, 0x9c4f);
-  fillArea(204, 13, 1, 190, 0x9c4f);
-
-  // Create empty holes
-  int xHole = 0;
-  int yHole = 0;
-  // Loop for creating each hole
-  while (xHole != 4) {
-    while (yHole != 4) {
-      createTile(21 + (46 * xHole), 21 + (46 * yHole), 0xb512, 0, 0);
-      yHole = yHole + 1;
+static void drawBoard(void) {
+    toastActive = false; /* a repaint erases any transient message */
+    for (int r = 0; r < 4; r++) {
+        for (int c = 0; c < 4; c++) {
+            int x = cellX(c);
+            int y = cellY(r);
+            int v = board[r][c];
+            if (v == 0) {
+                panel(x, y, CELL_SIZE, CELL_SIZE, CELL_EMPTY, BOARD_BG);
+            } else {
+                panel(x, y, CELL_SIZE, CELL_SIZE, tileColorTable()[colorIndexFor(v)], BOARD_BG);
+                drawTileNumber(x, y, v);
+            }
+        }
     }
-    yHole = 0;
-    xHole = xHole + 1;
-  }
-
-  // Put the logo on the screen
-  // # make a lite version with text to replace the logo save 20kb
-  VRAM_CopySprite(logo, 249, 25, 80, 58);
-
-  // Create score counter
-  fillArea(248, 105, 84, 42, 0x9c4f);
-  fillArea(249, 104, 82, 1, 0x9c4f);
-  fillArea(249, 147, 82, 1, 0x9c4f);
-  fillArea(247, 106, 1, 40, 0x9c4f);
-  fillArea(332, 105, 1, 40, 0x9c4f);
-
-  int xa = 265;
-  int ya = 82;
-  PrintMini(&xa, &ya, "score", 0x02, 0xffffffff, 0, 0, 0xe6fa, 0x9c4f, 1, 0);
-
-  Bdisp_PutDisp_DD(); // Update Screen
 }
 
-void updateScore() {
-  char buffer[20];
-  itoa(score, buffer);
-  // Store values in int
-  // Number are 12px wide
-  int i;
-  for(i = 0; buffer[i] != '\0'; ++i); // Get length of string
-  int xa = 290-(6*i);
-  int ya = 100;
-  PrintMini(&xa, &ya, buffer, 0x00, 0xffffffff, 0, 0, 0xffff, 0x9c4f, 1, 0);
+static void drawScore(void) {
+    char buf[12];
+    numToStr(score, buf);
+    fillRect(SCOREBOX_X + 2, SCOREBOX_Y + 22, SCOREBOX_W - 4, 14, BOARD_BG);
+    drawText(SCOREBOX_X + (SCOREBOX_W - textWidth(buf, 2)) / 2, SCOREBOX_Y + 24, buf, 2, TEXT_LIGHT);
+    numToStr(best, buf);
+    fillRect(BESTBOX_X + 2, SCOREBOX_Y + 22, SCOREBOX_W - 4, 14, BOARD_BG);
+    drawText(BESTBOX_X + (SCOREBOX_W - textWidth(buf, 2)) / 2, SCOREBOX_Y + 24, buf, 2, TEXT_LIGHT);
 }
 
-int tileValueToColor(int val) {
-  switch (val) {
-    case 2:
-      return 0;
-      break;
-    case 4:
-      return 1;
-      break;
-    case 8:
-      return 2;
-      break;
-    case 16:
-      return 3;
-      break;
-    case 32:
-      return 4;
-      break;
-    case 64:
-      return 5;
-      break;
-    case 128:
-      return 6;
-      break;
-    case 256:
-      return 7;
-      break;
-    case 512:
-      return 8;
-      break;
-    case 1024:
-      return 9;
-      break;
-    case 2048:
-      return 10;
-      break;
-    default:
-      return 11;
-      break;
-  }
+static void drawStaticFrame(void) {
+    fillRect(0, 0, LCD_WIDTH_PX, LCD_HEIGHT_PX, PAGE_BG);
+    VRAM_CopySprite(logo, 255, 10, 80, 58);
+
+    panel(BOARD_X, BOARD_Y, BOARD_SIZE, BOARD_SIZE, BOARD_BG, PAGE_BG);
+    panel(SCOREBOX_X, SCOREBOX_Y, SCOREBOX_W, SCOREBOX_H, BOARD_BG, PAGE_BG);
+    panel(BESTBOX_X, SCOREBOX_Y, SCOREBOX_W, SCOREBOX_H, BOARD_BG, PAGE_BG);
+
+    drawTextCentered(SCOREBOX_X, SCOREBOX_W, SCOREBOX_Y + 6, "SCORE", 2, TEXT_LIGHT);
+    drawTextCentered(BESTBOX_X, SCOREBOX_W, SCOREBOX_Y + 6, "BEST", 2, TEXT_LIGHT);
+
+    drawText(SCOREBOX_X, 122, "ARROWS: MOVE", 2, TEXT_DARK);
+    drawText(SCOREBOX_X, 138, "F1: UNDO LAST", 2, TEXT_DARK);
+    drawText(SCOREBOX_X, 154, "F2: SETTINGS", 2, TEXT_DARK);
+    drawText(SCOREBOX_X, 170, "SHIFT: NEW GAME", 2, TEXT_DARK);
+    drawText(SCOREBOX_X, 186, "EXIT: SAVE+QUIT", 2, TEXT_DARK);
 }
 
-void drawBoard() {
-  int xTile = 0;
-  int yTile = 0;
-  // Loop for creating each hole
-  while (xTile != 4) {
-    while (yTile != 4) {
-      if (board[yTile][xTile] != 0) {
-        createTile(21 + (46 * xTile), 21 + (46 * yTile), tileColor[tileValueToColor(board[yTile][xTile])], board[yTile][xTile], textColor[tileValueToColor(board[yTile][xTile])]);
-      } else {
-        createTile(21 + (46 * xTile), 21 + (46 * yTile), 0xb512, 0, 0);
-      }
-      yTile = yTile + 1;
+static void drawOverlay(bool winOverlay) {
+    panel(30, 88, 146, 64, BOARD_BG, BOARD_BG);
+    if (winOverlay) {
+        drawTextCentered(30, 146, 96, "YOU WIN!", 3, TEXT_LIGHT);
+        drawTextCentered(30, 146, 118, "PRESS ARROWS TO", 2, TEXT_LIGHT);
+        drawTextCentered(30, 146, 132, "KEEP GOING", 2, TEXT_LIGHT);
+    } else {
+        drawTextCentered(30, 146, 96, "GAME OVER", 3, TEXT_LIGHT);
+        char msg[24];
+        const char* prefix = "SCORE: ";
+        char* p = msg;
+        while (*prefix != '\0') *p++ = *prefix++;
+        p += numToStr(score, p);
+        *p = '\0';
+        drawTextCentered(30, 146, 118, msg, 2, TEXT_LIGHT);
+        drawTextCentered(30, 146, 132, "SHIFT: NEW GAME", 2, TEXT_LIGHT);
     }
-    yTile = 0;
-    xTile = xTile + 1;
-  }
 }
 
-int createRandomTile() {
-  int done = 0;
+/* ------------------------------------------------------------------ */
+/* Save / restore (\fls0\G2048.DAT, written while the player pauses)        */
+/* ------------------------------------------------------------------ */
+#define SAVE_MAGIC   0x32303438u /* "2048" */
+#define SAVE_VERSION 2u
+#define SAVE_VERSION_LEGACY 1u
 
-  if (emptySpotsOnBoard() == 0) {
-    done = 1;
-    return 1;
-  }
+typedef struct {
+    unsigned int magic;
+    unsigned int version;
+    unsigned int score;
+    unsigned int best;
+    unsigned int won;
+    unsigned int keepPlaying;
+    unsigned int settings; /* option bits; 0 in legacy version-1 files */
+    unsigned int board[16];
+} SaveState; /* 92 bytes: proven fine for direct read and write here */
 
-  while (!done) {
-    // Create random spot and calue
-    int x = (int)((float)rand()*4/(32768+1));
-    int y = (int)((float)rand()*4/(32768+1));
-    int v = (int)((float)rand()*10/(32768+1));
+static SaveState saveBuf; /* static: the buffer proven good by the STEP runs */
+static unsigned short savePath[32];
 
-    // Check if spot is empty
-    if (board[y][x] == 0) {
-      if (v == 0) {
-        board[y][x] = 4;
-      } else {
-        board[y][x] = 2;
-      }
+static void saveMakePath(void) {
+    Bfile_StrToName_ncpy(savePath, "\\\\fls0\\G2048.DAT", 32);
+}
 
-      done = 1;
+static bool saveWriteState(int savedScore, const int src[4][4], bool savedWon, bool savedKeepPlaying) {
+    SaveState* s = &saveBuf;
+    s->magic = SAVE_MAGIC;
+    s->version = SAVE_VERSION;
+    s->score = (unsigned int)savedScore;
+    s->best = (unsigned int)best;
+    s->won = savedWon ? 1u : 0u;
+    s->keepPlaying = savedKeepPlaying ? 1u : 0u;
+    s->settings = options;
+    for (int i = 0; i < 16; i++) s->board[i] = (unsigned int)src[i / 4][i % 4];
+
+    saveMakePath();
+    int handle = Bfile_OpenFile_OS(savePath, READWRITE, 0);
+    if (handle < 0) {
+        /* File missing: create it at the exact size (as the original version
+           did, proven working). NEVER delete/recreate an existing file here:
+           the STEP diagnostics showed Bfile_DeleteEntry hangs the OS on this
+           device, and there is no need to ever shrink or reshape the file. */
+        size_t size = sizeof(SaveState);
+        if (Bfile_CreateEntry_OS(savePath, CREATEMODE_FILE, &size) < 0) return false;
+        handle = Bfile_OpenFile_OS(savePath, READWRITE, 0);
     }
-  }
-
-  return 0;
+    if (handle < 0) return false;
+    bool ok = Bfile_SeekFile_OS(handle, 0) >= 0 &&
+              Bfile_WriteFile_OS(handle, s, sizeof(SaveState)) >= 0;
+    Bfile_CloseFile_OS(handle);
+    return ok;
 }
 
-void slideTile(int p) {
-  int times = 0;
+static void persist(void) {
+    bool ok;
+    if (over) {
+        /* official behaviour: clear the saved game, keep the best score */
+        int empty[4][4] = {{0}};
+        ok = saveWriteState(0, empty, false, false);
+    } else {
+        ok = saveWriteState(score, board, won, keepPlaying);
+    }
+    if (ok) {
+        dirty = false;
+        saveBroken = false;
+        movesSinceSave = 0;
+    } else {
+        /* One-shot on failure: hammering Bfile every move can hang the OS. */
+        saveBroken = true;
+    }
+}
 
-  // Movement vars
-  int a = 0;
-  int b = 0;
-  int c = 0;
-  int d = 0;
+/* On-screen stage marker: if a Bfile call ever hangs again, the last step
+   shown on screen names the offending syscall. */
+static void diag(const char* step) {
+    fillRect(BOARD_X + 6, BOARD_Y + BOARD_SIZE / 2 + 24, BOARD_SIZE - 12, 14, BOARD_BG);
+    drawTextCentered(BOARD_X, BOARD_SIZE, BOARD_Y + BOARD_SIZE / 2 + 26, step, 2, TEXT_LIGHT);
+    Bdisp_PutDisp_DD();
+}
 
-  while (times != 4) {
-    int xTile = 0;
-    int yTile = 0;
+/* Reads the save with only the syscalls proven safe on this device (open,
+   read, close). Bfile_DeleteEntry is deliberately never called anywhere:
+   the STEP diagnostics showed it hangs this OS. */
+static bool saveLoad(void) {
+    for (int r = 0; r < 4; r++)
+        for (int c = 0; c < 4; c++) board[r][c] = 0;
+    score = 0;
+    best = 0;
+    won = false;
+    keepPlaying = false;
+    over = false;
 
-    while (xTile != 4) {
-      while (yTile != 4) {
-        // Set correct move vars
-        if (p == 0) {
-          a = -1;
-          c = yTile;
-          d = 0;
-        } else if (p == 1) {
-          a = 1;
-          c = yTile;
-          d = 3;
-        } else if (p == 2) {
-          b = -1;
-          c = xTile;
-          d = 0;
-        } else if (p == 3) {
-          b = 1;
-          c = xTile;
-          d = 3;
+    saveMakePath();
+    diag("STEP 1 OPEN");
+    int handle = Bfile_OpenFile_OS(savePath, READ, 0);
+    if (handle < 0) return false;
+
+    diag("STEP 2 READ");
+    int bytesRead = Bfile_ReadFile_OS(handle, &saveBuf, sizeof(SaveState), 0);
+    Bfile_CloseFile_OS(handle);
+    diag("STEP 3 DONE");
+
+    if (bytesRead != (int)sizeof(SaveState)) return false;
+    if (saveBuf.magic != SAVE_MAGIC) return false;
+    if (saveBuf.version != SAVE_VERSION && saveBuf.version != SAVE_VERSION_LEGACY) return false;
+
+    /* legacy version-1 files carry no settings word: keep the defaults */
+    if (saveBuf.version >= SAVE_VERSION) options = saveBuf.settings;
+    else options = OPT_DEFAULT;
+
+    best = (int)saveBuf.best;
+    bool hasGame = false;
+    for (int i = 0; i < 16; i++) {
+        board[i / 4][i % 4] = (int)saveBuf.board[i];
+        if (saveBuf.board[i] != 0) hasGame = true;
+    }
+    if (!hasGame) return false; /* cleared state: fresh game, best kept */
+    score = (int)saveBuf.score;
+    won = saveBuf.won != 0;
+    keepPlaying = saveBuf.keepPlaying != 0;
+    return true;
+}
+
+/* ------------------------------------------------------------------ */
+/* Official 2048 game logic (mirrors js/game_manager.js)               */
+/* ------------------------------------------------------------------ */
+static void spawnRandomTile(void) {
+    int emptyRow[16];
+    int emptyCol[16];
+    int count = 0;
+    for (int r = 0; r < 4; r++) {
+        for (int c = 0; c < 4; c++) {
+            if (board[r][c] == 0) {
+                emptyRow[count] = r;
+                emptyCol[count] = c;
+                count++;
+            }
+        }
+    }
+    if (count == 0) return;
+    int index = rand() % count;
+    board[emptyRow[index]][emptyCol[index]] = (rand() % 10 == 9) ? 4 : 2; /* 90% 2, 10% 4 */
+}
+
+static bool movesAvailable(void) {
+    for (int r = 0; r < 4; r++) {
+        for (int c = 0; c < 4; c++) {
+            if (board[r][c] == 0) return true;
+            if (c < 3 && board[r][c] == board[r][c + 1]) return true;
+            if (r < 3 && board[r][c] == board[r + 1][c]) return true;
+        }
+    }
+    return false;
+}
+
+/* Slide one line toward index 0: compress the tiles, then merge equal
+   neighbours starting from the edge. A tile created by a merge cannot merge
+   again within the same move (official "mergedFrom" rule). */
+static bool slideLine(int line[4]) {
+    int out[4] = {0, 0, 0, 0};
+    bool merged[4] = {false, false, false, false};
+    int pos = 0;
+    for (int i = 0; i < 4; i++) {
+        if (line[i] == 0) continue;
+        if (pos > 0 && out[pos - 1] == line[i] && !merged[pos - 1]) {
+            out[pos - 1] *= 2;
+            merged[pos - 1] = true;
+            score += out[pos - 1];
+            if (out[pos - 1] == 2048) won = true;
+        } else {
+            out[pos] = line[i];
+            pos++;
+        }
+    }
+    bool moved = false;
+    for (int i = 0; i < 4; i++) {
+        if (line[i] != out[i]) moved = true;
+        line[i] = out[i];
+    }
+    return moved;
+}
+
+/* One key press = one move. Returns true when the board changed; only then
+   a new tile spawns and the game-over check runs. */
+static bool doMove(int dir) { /* 0 up, 1 right, 2 down, 3 left */
+    if (over || (won && !keepPlaying)) return false;
+    bool moved = false;
+    for (int r = 0; r < 4; r++) {
+        int line[4];
+        for (int i = 0; i < 4; i++) {
+            switch (dir) {
+                case 0: line[i] = board[i][r]; break;     /* up    */
+                case 1: line[i] = board[r][3 - i]; break; /* right */
+                case 2: line[i] = board[3 - i][r]; break; /* down  */
+                case 3: line[i] = board[r][i]; break;     /* left  */
+            }
+        }
+        bool lineMoved = slideLine(line);
+        if (lineMoved) moved = true;
+        for (int i = 0; i < 4; i++) {
+            switch (dir) {
+                case 0: board[i][r] = line[i]; break;
+                case 1: board[r][3 - i] = line[i]; break;
+                case 2: board[3 - i][r] = line[i]; break;
+                case 3: board[r][i] = line[i]; break;
+            }
+        }
+    }
+    if (!moved) return false;
+    if (score > best) best = score;
+    spawnRandomTile();
+    if (!movesAvailable()) over = true;
+    return true;
+}
+
+static void newGame(void) {
+    for (int r = 0; r < 4; r++)
+        for (int c = 0; c < 4; c++) board[r][c] = 0;
+    score = 0;
+    won = false;
+    keepPlaying = false;
+    over = false;
+    spawnRandomTile();
+    spawnRandomTile();
+    drawStaticFrame();
+    drawBoard();
+    drawScore();
+    present();
+    undoAvailable = false; /* a fresh game has nothing to undo */
+    dirty = true;
+    persist();
+}
+
+/* Restore the position from before the last accepted move. Single step only
+   (official 2048 behaviour) and it also clears a game-over state. */
+static void undoApply(void) {
+    if (!undoAvailable) {
+        showToast("NOTHING TO UNDO");
+        return;
+    }
+    for (int r = 0; r < 4; r++)
+        for (int c = 0; c < 4; c++) board[r][c] = undoBoard[r][c];
+    score = undoScore;
+    won = undoWon;
+    keepPlaying = undoKeepPlaying;
+    over = false;          /* undoing the losing move revives the game */
+    undoAvailable = false; /* one step only */
+    dirty = true;          /* the undone position is what gets saved next */
+    drawBoard();
+    drawScore();
+    present();
+}
+
+/* ------------------------------------------------------------------ */
+/* Input: PRGM_GetKey, the non-blocking keyscan the minesweeper uses and */
+/* the only input path proven on this device. GetKeyWait_OS was removed  */
+/* after the STEP diagnostics showed it hanging once filesystem calls    */
+/* had run. It returns a KEY_PRGM_* code, or 0 while nothing is pressed. */
+/* ------------------------------------------------------------------ */
+static int readKey(void) {
+    return PRGM_GetKey();
+}
+
+static void waitKeyRelease(void) {
+    unsigned int released = 0;
+    bool quiet = false;
+    /* A single empty scan must not re-arm the key used to close a dialog. */
+    while (1) {
+        int key = readKey();
+        unsigned int now = RTC_GetTicks();
+        if (key != 0) quiet = false;
+        else if (!quiet) {
+            released = now;
+            quiet = true;
+        } else if ((unsigned int)(now - released) >= 2) return;
+    }
+}
+
+static void openMainMenu(void) {
+    /* Find the OS routine that saves and restores the add-in's own context. */
+    unsigned int table = *(volatile unsigned int *)0x8002007c;
+    if ((table & 3) || table < 0x80020070 || table > 0x81000000 - 0x1e59 * 4) return;
+    unsigned int entry = *(const unsigned int *)(table + 0x1e58 * 4);
+    if ((entry & 1) || entry < 0x80020070 || entry > 0x81000000 - 300) return;
+    const unsigned short *code = (const unsigned short *)entry;
+    for (unsigned int i = 0; i + 5 < 150; i++) {
+        if ((code[i] & 0xff00) != 0xde00 || code[i + 1] != 0xe203 ||
+            (code[i + 2] & 0xf000) != 0xb000 || code[i + 3] != 0x2e20 ||
+            (code[i + 4] & 0xf000) != 0xa000 || code[i + 5] != 0x0009) continue;
+        int displacement = code[i + 2] & 0x0fff;
+        if (displacement & 0x0800) displacement -= 0x1000;
+        unsigned int target = entry + i * 2 + 8 + displacement * 2;
+        if (target < 0x80020070 || target >= 0x81000000) return;
+        ((void (*)(void))target)();
+        return;
+    }
+}
+
+/* ------------------------------------------------------------------ */
+/* Settings page (F2)                                                  */
+/* ------------------------------------------------------------------ */
+#define SETTING_COUNT 4
+
+static const char* settingLabel(int i) {
+    switch (i) {
+        case 0: return "COLORS";
+        case 1: return "HOLD REPEAT";
+        case 2: return "AUTOSAVE";
+        default: return "NEW GAME ASK";
+    }
+}
+
+static const char* settingValue(int i) {
+    switch (i) {
+        case 0: return (options & OPT_VIVID) ? "VIVID" : "CLASSIC";
+        case 1: return (options & OPT_HOLD_REPEAT) ? "ON" : "OFF";
+        case 2: return (options & OPT_AUTOSAVE_EXIT) ? "EXIT ONLY" : "ON PAUSE";
+        default: return (options & OPT_CONFIRM_NEW) ? "ON" : "OFF";
+    }
+}
+
+static void settingToggle(int i) {
+    switch (i) {
+        case 0: options ^= OPT_VIVID; break;
+        case 1: options ^= OPT_HOLD_REPEAT; break;
+        case 2: options ^= OPT_AUTOSAVE_EXIT; break;
+        default: options ^= OPT_CONFIRM_NEW; break;
+    }
+}
+
+static void settingsDraw(int cursor) {
+    fillRect(0, 0, LCD_WIDTH_PX, LCD_HEIGHT_PX, PAGE_BG);
+    drawTextCentered(0, LCD_WIDTH_PX, 12, "SETTINGS", 3, TEXT_DARK);
+    for (int i = 0; i < SETTING_COUNT; i++) {
+        int y = 56 + i * 28;
+        const char* label = settingLabel(i);
+        const char* value = settingValue(i);
+        if (i == cursor) panel(14, y - 7, LCD_WIDTH_PX - 28, 24, BOARD_BG, PAGE_BG);
+        drawText(28, y, label, 2, i == cursor ? TEXT_LIGHT : TEXT_DARK);
+        drawText(LCD_WIDTH_PX - 28 - textWidth(value, 2), y, value, 2,
+                 i == cursor ? TEXT_LIGHT : TEXT_DARK);
+    }
+    drawTextCentered(0, LCD_WIDTH_PX, 182, "ARROWS: CHANGE", 2, TEXT_DARK);
+    drawTextCentered(0, LCD_WIDTH_PX, 198, "EXIT: BACK TO GAME", 2, TEXT_DARK);
+    present();
+}
+
+static void settingsPage(void) {
+    int cursor = 0;
+    /* seed with the key still held that opened this page, otherwise that
+       same press closes it again instantly */
+    int lastKey = readKey();
+    settingsDraw(cursor);
+    while (1) {
+        int key = readKey();
+        if (key == 0) { lastKey = 0; continue; }
+        if (key == lastKey) continue;
+        lastKey = key;
+
+        if (key == KEY_PRGM_EXIT || key == KEY_PRGM_MENU || key == KEY_PRGM_F2) {
+            waitKeyRelease();
+            break;
+        }
+        if (key == KEY_PRGM_UP) {
+            cursor = (cursor + SETTING_COUNT - 1) % SETTING_COUNT;
+            settingsDraw(cursor);
+        } else if (key == KEY_PRGM_DOWN) {
+            cursor = (cursor + 1) % SETTING_COUNT;
+            settingsDraw(cursor);
+        } else if (key == KEY_PRGM_LEFT || key == KEY_PRGM_RIGHT || key == KEY_PRGM_RETURN) {
+            settingToggle(cursor);
+            settingsDraw(cursor);
+            dirty = true;  /* options live in the save file */
+            persist();     /* write now so a reset keeps the choice */
+        }
+    }
+    /* back to the board, repainted with the (possibly new) palette */
+    drawStaticFrame();
+    drawBoard();
+    drawScore();
+    if (over) drawOverlay(false);
+    else if (won && !keepPlaying) drawOverlay(true);
+    present();
+}
+
+/* Returns true when the player confirms wiping the current game. */
+static bool confirmNewGame(void) {
+    panel(46, 88, 148, 60, BOARD_BG, BOARD_BG);
+    drawTextCentered(46, 148, 96, "NEW GAME?", 3, TEXT_LIGHT);
+    drawTextCentered(46, 148, 118, "EXE: YES", 2, TEXT_LIGHT);
+    drawTextCentered(46, 148, 132, "EXIT: NO", 2, TEXT_LIGHT);
+    present();
+    /* seed with the key still held that opened the dialog */
+    int lastKey = readKey();
+    while (1) {
+        int key = readKey();
+        if (key == 0) { lastKey = 0; continue; }
+        if (key == lastKey) continue;
+        lastKey = key;
+        if (key == KEY_PRGM_RETURN || key == KEY_PRGM_EXIT || key == KEY_PRGM_MENU) {
+            waitKeyRelease();
+            return key == KEY_PRGM_RETURN;
+        }
+    }
+}
+
+/* One key event inside the game. */
+static void gameKeyEvent(int key) {
+    if (key == KEY_PRGM_EXIT || key == KEY_PRGM_MENU) {
+        if (dirty || saveBroken) persist();
+        waitKeyRelease();
+        /* Returning from main leaves the OS with an add-in it cannot resume. */
+        openMainMenu();
+        drawStaticFrame();
+        drawBoard();
+        drawScore();
+        if (over) drawOverlay(false);
+        else if (won && !keepPlaying) drawOverlay(true);
+        present();
+        waitKeyRelease();
+        return;
+    }
+    if (key == KEY_PRGM_SHIFT) {
+        bool wipe = true;
+        if (options & OPT_CONFIRM_NEW) wipe = confirmNewGame();
+        if (wipe) {
+            newGame();
+        } else {
+            drawBoard();
+            drawScore();
+            if (over) drawOverlay(false);
+            else if (won && !keepPlaying) drawOverlay(true);
+            present();
+        }
+        return;
+    }
+    if (key == KEY_PRGM_F1) {
+        undoApply();
+        return;
+    }
+    if (key == KEY_PRGM_F2) {
+        settingsPage();
+        return;
+    }
+
+    int dir = -1;
+    if (key == KEY_PRGM_UP) dir = 0;
+    else if (key == KEY_PRGM_RIGHT) dir = 1;
+    else if (key == KEY_PRGM_DOWN) dir = 2;
+    else if (key == KEY_PRGM_LEFT) dir = 3;
+    if (dir < 0) return;
+
+    /* snapshot the pre-move position so F1 can undo exactly one step */
+    int preBoard[4][4];
+    int preScore = score;
+    bool preWon = won;
+    bool preKeepPlaying = keepPlaying;
+    for (int r = 0; r < 4; r++)
+        for (int c = 0; c < 4; c++) preBoard[r][c] = board[r][c];
+
+    /* official win overlay: the next arrow press keeps playing */
+    bool dismissedWinOverlay = false;
+    if (won && !keepPlaying) {
+        keepPlaying = true;
+        dismissedWinOverlay = true;
+    }
+
+    bool moved = doMove(dir);
+    if (!moved && !dismissedWinOverlay) return;
+
+    /* commit the snapshot only when something actually changed */
+    for (int r = 0; r < 4; r++)
+        for (int c = 0; c < 4; c++) undoBoard[r][c] = preBoard[r][c];
+    undoScore = preScore;
+    undoWon = preWon;
+    undoKeepPlaying = preKeepPlaying;
+    undoAvailable = true;
+
+    dirty = true;
+    movesSinceSave++;
+    drawBoard();
+    drawScore();
+    if (over) {
+        drawOverlay(false);
+        persist();          /* game end: clear the save (official) */
+    } else if (won && !keepPlaying) {
+        drawOverlay(true);
+        persist();          /* the win itself is worth recording */
+    } else if (movesSinceSave >= MOVE_SAVE_LIMIT) {
+        persist();          /* bounded-loss checkpoint */
+    }
+    present();
+}
+
+/* ------------------------------------------------------------------ */
+/* Main                                                                */
+/* ------------------------------------------------------------------ */
+
+/* ------------------------------------------------------------------ */
+/* Main                                                                */
+/* ------------------------------------------------------------------ */
+int main(void) {
+    EnableStatusArea(3);
+    Bdisp_EnableColor(1);
+    srand((unsigned int)RTC_GetTicks());
+
+    /* Paint first, read second: the board must be on screen before any
+       filesystem call. A short grace lets a held key skip the restore, so
+       the launch can never be blocked by a slow storage layer. */
+    drawStaticFrame();
+    drawBoard();
+    drawScore();
+    drawTextCentered(BOARD_X, BOARD_SIZE, BOARD_Y + BOARD_SIZE / 2 - 22, "RESTORING...", 3, TEXT_DARK);
+    drawTextCentered(BOARD_X, BOARD_SIZE, BOARD_Y + BOARD_SIZE / 2 + 4, "ANY KEY = NEW GAME", 2, TEXT_DARK);
+    present();
+
+    unsigned int graceStart = RTC_GetTicks();
+    bool skipRestore = false;
+    while ((unsigned int)(RTC_GetTicks() - graceStart) < RESTORE_GRACE_TICKS) {
+        if (readKey() != 0) { skipRestore = true; break; }
+    }
+
+    bool resumed = false;
+    if (!skipRestore) resumed = saveLoad();
+    if (resumed && !movesAvailable()) {
+        /* the restored board was already dead: show game over and clear */
+        over = true;
+        dirty = true;
+    }
+    if (!resumed) {
+        spawnRandomTile();
+        spawnRandomTile();
+        dirty = true;
+    }
+    drawStaticFrame();
+    drawBoard();
+    drawScore();
+    if (over) drawOverlay(false);
+    else if (won && !keepPlaying) drawOverlay(true);
+    present();
+
+    /* seed with any key still held (e.g. the one that skipped the restore) */
+    int lastKey = readKey();
+    unsigned int lastActivity = RTC_GetTicks();
+    unsigned int lastEvent = lastActivity;
+    while (1) {
+        int key = readKey();
+        unsigned int now = RTC_GetTicks();
+
+        bool arrow = key == KEY_PRGM_UP || key == KEY_PRGM_RIGHT ||
+                     key == KEY_PRGM_DOWN || key == KEY_PRGM_LEFT;
+        bool holdRepeat = arrow && (key == lastKey) &&
+                          (options & OPT_HOLD_REPEAT) &&
+                          ((unsigned int)(now - lastEvent) >= HOLD_REPEAT_TICKS);
+
+        if (key != 0 && (key != lastKey || holdRepeat)) {
+            lastEvent = now;
+            lastActivity = now;
+            lastKey = key;
+            gameKeyEvent(key);
+            continue;
+        }
+        if (key == 0) lastKey = 0;
+
+        /* erase a transient message ~2 s after it appeared */
+        if (toastActive && (unsigned int)(now - toastTicks) >= TOAST_TICKS) {
+            drawBoard();
+            drawScore();
+            if (over) drawOverlay(false);
+            else if (won && !keepPlaying) drawOverlay(true);
+            present();
         }
 
-        // Move
-        if (c != d) {
-          if (board[yTile+a][xTile+b] == 0) {
-            board[yTile+a][xTile+b] = board[yTile][xTile];
-            board[yTile][xTile] = 0;
-          } else if (board[yTile+a][xTile+b] == board[yTile][xTile]) {
-            board[yTile+a][xTile+b] = board[yTile][xTile]*2;
-            board[yTile][xTile] = 0;
-            score = score + board[yTile+a][xTile+b];
-          }
+        /* idle: ~2 s without input is the safe moment to write flash */
+        if (!(options & OPT_AUTOSAVE_EXIT) && dirty && !saveBroken &&
+            (unsigned int)(now - lastActivity) >= IDLE_SAVE_TICKS) {
+            persist();
+            lastActivity = now;
         }
-
-        yTile = yTile + 1;
-      }
-      yTile = 0;
-      xTile = xTile + 1;
     }
-
-    times = times + 1;
-  }
-
-  int exit = createRandomTile();
-  drawBoard(); // Update the screen
-  updateScore();
-  if (exit) {
-    PrintXY(1,1,"--You lost. Press SHIFT.", TEXT_MODE_NORMAL, TEXT_COLOR_BLACK);
-    PrintXY(1,2,"--to restart.", TEXT_MODE_NORMAL, TEXT_COLOR_BLACK);
-  }
-}
-
-void restart() {
-  // Clear the board
-  int xTile = 0;
-  int yTile = 0;
-  // Loop for each hole
-  while (xTile != 4) {
-    while (yTile != 4) {
-      board[yTile][xTile] = 0;
-      yTile = yTile + 1;
-    }
-    yTile = 0;
-    xTile = xTile + 1;
-  }
-  // Reset the score
-  score = 0;
-
-  // Update the screen
-  drawBackground(); // Draw the background
-  createRandomTile(); // Create two random tiles
-  createRandomTile();
-  drawBoard();  // Update the screen
-  updateScore();
-}
-
-// Main function
-int main() {
-  EnableStatusArea(3); // Disable the status area
-  Bdisp_EnableColor(1); // Enable 16-bit color
-  srand(RTC_GetTicks()); // Init random
-  drawBackground(); // Draw the background
-  createRandomTile(); // Create two random tiles
-  createRandomTile();
-  drawBoard();  // Update the screen
-  updateScore();
-
-  // Loop for the keyboard
-  while (1) {
-    GetKey(&key);
-    switch (key) {
-      case KEY_CTRL_UP:
-        slideTile(0);
-        break;
-      case KEY_CTRL_DOWN:
-        slideTile(1);
-        break;
-      case KEY_CTRL_LEFT:
-        slideTile(2);
-        break;
-      case KEY_CTRL_RIGHT:
-        slideTile(3);
-        break;
-      case KEY_CTRL_SHIFT:
-        restart();
-        break;
-      case KEY_CTRL_EXIT:
-        return 0;
-    }
-  }
-
-  return 0; // Return 0 if the programm ends
+    return 0;
 }

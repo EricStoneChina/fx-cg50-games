@@ -23,6 +23,7 @@ void Menu_create(Menu* menu) {
 
 void Menu_free(Menu* menu) {
     if (menu->board) { Board_free(menu->board); }
+    PersonalBest_flush();
     sys_free(menu);
 }
 
@@ -210,6 +211,7 @@ void Menu_handleKeypress(Menu* menu, int key) {
             menu->board = 0x0;
             menu->settingRow = 0;
             menu->settingCursorPosition = 0;
+            PersonalBest_flush();
         }
 
         return;

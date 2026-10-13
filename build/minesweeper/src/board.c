@@ -416,6 +416,7 @@ void Board_flag(Board* board, int row, int col) {
 }
 
 void _revealCellIfNotFlagged(Board* board, int row, int col, void* _unused) {
+    if (board->won || board->lost) return;
     char* cell = Board_getCell(board, row, col);
     if (!Board_cellIsFlagged(cell) && Board_cellIsCovered(cell)) {
         Board_revealSingleCell(board, row, col, true);
@@ -446,6 +447,8 @@ void _highlightSurroundingCells(Board* board, int row, int col) {
 }
 
 void Board_revealSingleCell(Board* board, int row, int col, bool force) {
+    if (board->won || board->lost) return;
+
     board->highlightTicks = -1;
     char* cell = Board_getCell(board, row, col);
 
@@ -502,6 +505,9 @@ void Board_revealSingleCell(Board* board, int row, int col, bool force) {
 
     Board_checkWinCondition(board);
 
+    // Win may have just fired mid-cascade; do not keep flooding after settle.
+    if (board->won || board->lost) return;
+
     if (*cell == kTileTypeZero) {
         // reveal surrounding cells
         Board_revealSurroundingCells(board, row, col);
@@ -510,6 +516,8 @@ void Board_revealSingleCell(Board* board, int row, int col, bool force) {
 }
 
 void Board_kablooey(Board* board) {
+    if (board->won || board->lost) return;
+
     Board_onGameComplete(board, false);
 
     // set certain tiles to special ones
@@ -533,12 +541,14 @@ void Board_kablooey(Board* board) {
 }
 
 void Board_onGameComplete(Board* board, bool won) {
-    // Freeze elapsed time before any file I/O. The old hardware timer could
-    // remain registered after the add-in returned, making the OS call an
-    // unmapped callback address and causing a TLB ERROR.
+    // Only enter settle once. Flood/chord can keep calling after the last cell.
+    if (board->won || board->lost) return;
+
     Board_updateElapsedTime(board);
     if (won) {
         board->won = true;
+        // Memory-only PB update. File write is PersonalBest_flush() from the
+        // main loop, never from inside reveal recursion (stack + Bfile TLB).
         board->newPersonalBest = PersonalBest_record(board->width, board->height, board->mines, board->centiseconds);
     }
     else     board->lost = true;
@@ -549,12 +559,14 @@ void Board_onGameComplete(Board* board, bool won) {
 // note: force is enabled here, since we want to always uncover the tiles,
 // regardless of if they're flagged or not
 void _revealCellIfCovered(Board* board, int row, int col, void* _unused) {
+    if (board->won || board->lost) return;
     if (Board_cellIsCovered(Board_getCell(board, row, col))) {
         Board_revealSingleCell(board, row, col, true);
     }
 }
 
 void Board_revealSurroundingCells(Board* board, int row, int col) {
+    if (board->won || board->lost) return;
     Board_runForSurroundingCells(board, row, col, _revealCellIfCovered, 0x0);
 }
 
@@ -587,6 +599,8 @@ bool Board_cellIsCovered(char* cell) {
 }
 
 void Board_checkWinCondition(Board* board) {
+    if (board->won || board->lost) return;
+
     // if any cells are covered still and aren't mines, return
     for (int i = 0; i < board->width * board->height; i++) {
         if (
