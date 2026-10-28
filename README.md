@@ -1,97 +1,65 @@
-# fx-CG50 小游戏插件:2048 + 扫雷
+# fx-CG50 小游戏：2048 与扫雷
 
-为卡西欧 fx-CG50(Prizm)交叉编译的两个经典小游戏 Add-in。
+两款运行在 Casio fx-CG50 上的 `.g3a` 插件。安装包位于 `output/`，发行版同时提供校验值与验收记录。
 
-## 产物(output/)
-
-| 文件 | 说明 |
+| 安装包 | 游戏 |
 |---|---|
-| `2048-CG50.g3a` | 2048 数字合并游戏(仅 fx-CG50,VRAM 地址 0xAC000000) |
-| `Minesweeper-CG50.g3a` | 扫雷游戏(fx-CG10/20/50 通用) |
+| `2048-CG50.g3a` | 2048，使用 fx-CG50 的 VRAM 地址 |
+| `Minesweeper-CG50.g3a` | 扫雷，主菜单名称为 Mine |
 
-## 源码来源与许可证
+## 2048
 
-两个项目均来自 Cemetech Prizm 社区的开源示例(GitHub 仓库),已作为"示例"参考下载并适配:
+- 方向键移动；一次移动中的每个方块最多合并一次，只有棋盘变化才生成新方块。
+- `F1` 撤回上一步，`F2` 打开设置，`SHIFT` 开新局，`EXIT` 或 `MENU` 保存并返回系统菜单。
+- 合成 2048 显示胜利提示，方向键继续游戏；无空格且无可合并邻格时判负。
+- 设置包括 VIVID/CLASSIC 配色、按住方向键连发、停顿存档/仅退出存档和新局确认。
+- 棋盘、最高分和设置保存在存储根目录 `G2048.DAT`。新游戏的启动选择仍保留最高分和设置；损坏或不支持的存档内容不会导入棋盘。
+- 停顿存档模式在停止操作约两秒或达到步数上限时保存；退出、新局、胜利和终局也会保存。失败后显示红色 `NOT SAVED`，停止自动重试；手动保存成功后清除提示。
+- 大数方块、完整分数和撤回后的画面均使用当前内容重画，避免残影。
 
-1. **2048** — [wjtje/2048-fx-cg-10-20-50](https://github.com/wjtje/2048-fx-cg-10-20-50)
-   - Cemetech 下载页:https://www.cemetech.net/downloads/files/1912/x1912
-   - 许可证:**GPL v3 / AGPL v3**(见项目 LICENSE 与源文件头注释)
-2. **扫雷** — [undefined06855/casio-minesweeper](https://github.com/undefined06855/casio-minesweeper)
-   - Cemetech 同站亦有多个扫雷示例(如 1836/x1836)
-   - **注意:该仓库未声明许可证**,仅供个人学习/编辑使用;若需再分发请先联系作者确认。
+## 扫雷
 
-## 针对 PrizmSDK-win-0.6 的适配修改(build/ 副本)
+- 默认和最大棋盘为 16×8。设置页使用上下键选择行、左右键移动数字光标、数字键与 `DEL` 编辑，`F1` 开始。
+- 方向键移动光标，`ALPHA/F1` 插旗，`SHIFT/F6` 翻开。首次翻开保证安全；空间足够时同时保证周围无雷。
+- 再次翻开数字格时，周围旗数匹配则翻开其余邻格，否则短暂高亮未插旗的覆盖格。自动展开不会翻开旗帜。
+- 状态栏显示旗数和时间。胜负后棋盘与用时保留，可用方向键查看，`EXE/EXIT` 返回设置；游戏中 `EXIT/AC` 中止，`MENU` 返回系统菜单。
+- 每个宽×高×雷数组合的最佳成绩保存在 `MINESPB.DAT`，包含合法的 0.0 秒成绩。只有保存成功才显示 `NEW PB!`；保存失败显示可确认的提示，内存成绩回退，不逐帧重试。
+- 棋盘在输入及高亮消退时重画，计时状态栏单独刷新；两款游戏的轮询均包含短暂等待。
 
-上游代码面向旧版 PrizmSDK(`common/prizm_rules`),新版 SDK 目录改为 `toolchain/`,故在构建副本中做了以下最小改动:
+## 构建与源码
 
-- `build/2048/Makefile`
-  - `common/prizm_rules` → `toolchain/prizm_rules`
-  - `common/prizm.ld` → `toolchain/prizm.x`(链接脚本路径)
-  - `$(BUILD):` 规则中的 `[ -d $@ ] || mkdir $@` → `-mkdir $@`(Windows 无 `[` 命令)
-- `build/2048/src/`
-  - 新增占位 `color.h`(新版 libfxcg 已把 `color_t` 移入 `<fxcg/display.h>`)
-  - `sprite.h` 从项目根复制到 `src/`,`main.c` 中 `#include <sprite.h>`/`<color.h>` 改为相对引用
-
-## 真机反馈修复(2026-09-09)
-
-### 1. 扫雷方向键导致整个界面移动(已修复)
-
-- **根因**:`board.c` 的 `Board_updateOffset()` 用 `height*24+24 > LCD_HEIGHT_PX` 判断是否滚动,默认 9×9 棋盘高 216px(恰等于屏幕高 216px)被判为"超屏";再加 `pad=80` 的大边距和负的初始 `offsetY`,每次按方向键 `offsetY` 大幅漂移 → 整个棋盘移动。
-- **修复**:改为仅当棋盘**实际超过屏幕**(`width*24 > LCD_WIDTH_PX` / `height*24 > LCD_HEIGHT_PX`)时才滚动;滚动以整格(24px)为单位,且保证光标所在格完全可见。9×9 默认棋盘从此不再滚动,光标正常移动。
-- 大棋盘(如自定义 12×12)滚动行为保留,且更平滑。
-
-### 2. 扫雷图标不适配(已按 2048 逐像素测量重绘)
-
-- **根因**:原图标是浅灰调的密集棋盘(数字+小雷球),与 2048 的"大色块极简"风格完全不同。
-- **量化对齐**:直接读取 2048 图标的像素,得到其确切设计参数——
-  - 未选中背景:**纯白 #FFFFFF**;选中背景:**纯色浅天蓝 #68D4F8**(平坦,非渐变);
-  - 圆角方块:x 6..86、y 6..42(80×34,圆角 10),填充为微妙对角渐变(#E86E38→#E85134);
-  - 3D 效果:**仅底部约 2px 深色边**(#B82820),不是厚重投影;
-  - 方块中央一个大主体(白色粗体"2048"),下方留白约 20px 给 add-in 名称。
-- **重绘**:`make_icons.ps1` 按上述参数 1:1 复刻布局,仅替换主题——
-  - 方块改**绿色**(#4FB257→#3D9145 同款对角渐变,与 2048 橙红区分);
-  - 主体改为**经典扫雷雷球**(深色实心球 + 8 根短粗尖刺 + 白色高光);
-  - 背景、方块几何、圆角、底部深色边、留白位置全部与 2048 一致。
-- 对照图:`_icons/compare_2048_vs_mine.png`(两游戏四态并排)。
-- 重新执行 `powershell -ExecutionPolicy Bypass -File make_icons.ps1` 可随时再生成/微调。
-
-### 3. 按键习惯适配:Shift=翻开,Alpha=插旗
-
-- `Board_handleKeypress()` 新增:**Shift(KEY_PRGM_SHIFT)翻开格子**,**Alpha(KEY_PRGM_ALPHA)插旗**,原 F6(翻开)/F1(插旗)保留,两套并存;
-- 开局 5 秒的状态栏提示更新为 `F1/ALPHA Flag | F6/SHIFT Reveal`。
-
-## 构建环境与一键编译
-
-- 工具链:**PrizmSDK-win-0.6**(内含 sh3eb-elf-gcc 10.1.0、GNU make 4.3、mkg3a),已解压于 `PrizmSDK/PrizmSDK-win-0.6`
-- 一键脚本(需设置环境变量 `FXCGSDK` 指向 SDK 根目录):
+将 PrizmSDK-win-0.6 解压到 `PrizmSDK/PrizmSDK-win-0.6`，然后执行：
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File build.ps1
 ```
 
-- 手动构建示例:
+实际构建源码位于 `build/2048/src/` 与 `build/minesweeper/src/`，系统菜单切换共用 `build/common/main_menu.h`。`src/` 保存上游参考副本，不是当前构建入口。SDK、编译中间文件与 `.build/` 验收工作目录不提交。
+
+两款主菜单图标均为 92×64、24-bit RGB BMP，选中与未选中主体位置一致。重新生成图标使用 `make_icons.ps1`，随后重新构建；规范见 `AGENTS.md`。
+
+## 验证
+
+主机检查直接编译上述生产源码，以替代实现提供计算器系统调用：
 
 ```powershell
-$env:FXCGSDK = "D:\...\PrizmSDK\PrizmSDK-win-0.6"
-$env:PATH = "$env:FXCGSDK\bin;$env:PATH"
-# 2048(目标名 build,旧式 Makefile)
-cd build\2048; make build
-# 扫雷
-cd build\minesweeper; make all
+.\tests\run-2048-host.ps1 -Compiler gcc
+.\tests\run-minesweeper-host.ps1 -Compiler gcc
 ```
 
-## 安装到计算器
+覆盖 2048 的 2,401 种独立行合并预期、存档校验与故障提示、设置和绘制边界；扫雷覆盖 14,175 次安全生成、4,590 次翻开、65,024 个邻格展开预期，以及纪录回退、零秒纪录、输入和刷新。512 次静止轮询的主机检查只推屏两次，不代表真机耗电测量。
 
-1. 用 USB 数据线连接 fx-CG50 与电脑;
-2. 计算器弹出"USB 闪存"模式(确认连接)后,在电脑上把 `.g3a` 文件拖入计算器的存储根目录;
-3. 断开连接,在计算器主菜单(Main Menu)即可看到新 Add-in 图标。
+虚拟机使用本地真实固件执行两款插件，通过客体虚拟 USB 安装并读回核对安装包。游戏操作验收使用明确标注的调试器辅助按键；当前虚拟机的普通游戏按键扫描未通过，不能视为完整键盘验收。发行版附具体输入、客体截图、包与运行环境哈希及剩余限制。
 
-## 游戏操作
+尚未进行本次构建的实体计算器测试、断电恢复、耗电测量或其他机型验收。系统菜单切换依赖已在该客体固件核对的系统例程，其他固件仍需验证。
 
-- **2048**:方向键移动数字方块,相同数字合并;目标拼出 2048。
-- **扫雷**:方向键移动光标;`Alpha` 或 `F1` 插旗标记;`Shift` 或 `F6` 翻开格子;避开地雷翻开全部安全格即胜利。
+## 安装
 
-## 注意事项
+1. 用 USB 连接计算器并选择 USB 闪存模式。
+2. 将 `output/` 中的 `.g3a` 复制到计算器存储根目录。
+3. 完成写入并安全断开存储连接后，从主菜单打开游戏。
 
-- **真机验证**:本项目已在本机交叉编译并核验 g3a 头部信息,但未在真机/模拟器上跑通;请先在计算器上试运行。免费模拟器 casio-emu 不支持所有 g3a 特性,建议以真机为准。
-- 2048 的 `sprite.h` 将 VRAM 地址写死为 `0xAC000000`(fx-CG50),故 `2048-CG50.g3a` 仅适用于 CG50;扫雷基于 Bdisp 系列 API,通用于 CG10/20/50。
+## 来源与许可证
+
+- 2048 基于 [wjtje/2048-fx-cg-10-20-50](https://github.com/wjtje/2048-fx-cg-10-20-50)，规则参考 [gabrielecirulli/2048](https://github.com/gabrielecirulli/2048)。许可证见 `build/2048/LICENSE` 及源码声明。
+- 扫雷基于 [undefined06855/casio-minesweeper](https://github.com/undefined06855/casio-minesweeper)。上游未声明许可证；保留其来源说明，不将其视为获得了新的再许可。

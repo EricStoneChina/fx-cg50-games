@@ -1,20 +1,21 @@
 #include "menu.h"
 #include "utils.h"
+#include "personal_best.h"
 #include <fxcg/keyboard.h>
 #include <fxcg/heap.h>
 #include <fxcg/misc.h>
 #include <fxcg/rtc.h>
 
 void Menu_create(Menu* menu) {
-    menu->width = 9;
-    menu->height = 9;
+    PersonalBest_load();
+    menu->width = BOARD_MAX_WIDTH;
+    menu->height = BOARD_MAX_HEIGHT;
     menu->mines = 10;
 
     menu->settingCursorPosition = 0;
     menu->settingRow = 0;
 
     menu->notification = 0x0;
-    menu->notificationTime = -1;
 
     menu->board = 0x0;
 }
@@ -30,12 +31,7 @@ void Menu_draw(Menu* menu) {
         return;
     }
 
-    // TODO: draw a background that shows the board size + mines
-
     PrintCXY(10, 10, "Setup", TEXT_MODE_TRANSPARENT_BACKGROUND, -1, COLOR_BLACK, COLOR_WHITE, true, 0);
-
-    // PrintMini(&x, &y, "F1", 1 << 6, 0xffffffff, 0, 0, COLOR_NAVY, COLOR_WHITE, true, 0);
-    // PrintMini(&x, &y, " - Continue", 1 << 6, 0xffffffff, 0, 0, COLOR_BLACK, COLOR_WHITE, true, 0);
 
     unsigned char buf[12];
     int x = 24;
@@ -77,10 +73,34 @@ void Menu_draw(Menu* menu) {
         PrintMini(&x, &y, "%)", TEXT_MODE_TRANSPARENT_BACKGROUND, 0xffffffff, 0, 0, COLOR_BLACK, COLOR_WHITE, true, 0);
     }
 
-    PrintCXY(LCD_WIDTH_PX / 2 - 72, LCD_HEIGHT_PX - 80, "Continue", TEXT_MODE_TRANSPARENT_BACKGROUND, -1, COLOR_BLACK, COLOR_WHITE, true, 0);
+    int best = PersonalBest_get(menu->width, menu->height, menu->mines);
+    x = 24;
+    y = 128;
+    PrintMini(&x, &y, "Best: ", TEXT_MODE_TRANSPARENT_BACKGROUND, 0xffffffff, 0, 0, COLOR_BLACK, COLOR_WHITE, true, 0);
+    if (best >= 0) {
+        Utils_clearAndFillBuffer(buf, best / 10);
+        PrintMini(&x, &y, (const char*)buf, TEXT_MODE_TRANSPARENT_BACKGROUND, 0xffffffff, 0, 0, COLOR_NAVY, COLOR_WHITE, true, 0);
+        PrintMini(&x, &y, ".", TEXT_MODE_TRANSPARENT_BACKGROUND, 0xffffffff, 0, 0, COLOR_BLACK, COLOR_WHITE, true, 0);
+        Utils_clearAndFillBuffer(buf, best % 10);
+        PrintMini(&x, &y, (const char*)buf, TEXT_MODE_TRANSPARENT_BACKGROUND, 0xffffffff, 0, 0, COLOR_NAVY, COLOR_WHITE, true, 0);
+        PrintMini(&x, &y, "s", TEXT_MODE_TRANSPARENT_BACKGROUND, 0xffffffff, 0, 0, COLOR_BLACK, COLOR_WHITE, true, 0);
+    } else {
+        PrintMini(&x, &y, "--", TEXT_MODE_TRANSPARENT_BACKGROUND, 0xffffffff, 0, 0, COLOR_NAVY, COLOR_WHITE, true, 0);
+    }
+
+    int continueX = LCD_WIDTH_PX / 2 - (8 * charWidth) / 2;
+    // Keep the button below the PB line but well inside the 216 px display.
+    int continueY = LCD_HEIGHT_PX - 56;
+    PrintMini(&continueX, &continueY, "F1 Start", TEXT_MODE_TRANSPARENT_BACKGROUND, 0xffffffff, 0, 0, COLOR_BLACK, COLOR_WHITE, true, 0);
+
+    int helpX = 24;
+    int helpY = 148;
+    PrintMiniMini(&helpX, &helpY, "ALPHA/F1: Flag   SHIFT/F6: Reveal", 0, TEXT_COLOR_BLACK, false);
 
     if (menu->settingRow != 3) {
-        // calculator cursor position
+        int rowY = menu->settingRow * 24 + 46;
+        Bdisp_Rectangle(18, rowY, 218, rowY + 24, TEXT_COLOR_BLUE);
+        // Keep the insertion caret visible inside the selected row.
         int x = cursorStartPositions[menu->settingRow] + Menu_getCurrentSettingValueLength(menu) * charWidth - menu->settingCursorPosition * charWidth;
         int y = menu->settingRow * 24 + 50;
 
@@ -90,12 +110,12 @@ void Menu_draw(Menu* menu) {
             TEXT_COLOR_BLACK
         );
     } else {
-        int x = LCD_WIDTH_PX / 2 - 72;
-        int y = LCD_HEIGHT_PX - 80;
+        int x = LCD_WIDTH_PX / 2 - (8 * charWidth) / 2;
+        int y = LCD_HEIGHT_PX - 56;
 
         Bdisp_Rectangle(
             x - 4, y - 4,
-            x + 8*18 + 4, y + 18 + 4,
+            x + 8*charWidth + 4, y + 18 + 4,
             TEXT_COLOR_BLACK
         );
     }
@@ -168,21 +188,34 @@ void Menu_draw(Menu* menu) {
 void Menu_drawStatusArea(Menu* menu) {
     if (menu->board) {
         Board_drawStatusArea(menu->board);
+    } else {
+        int x = 24;
+        int y = 2;
+        PrintMini(&x, &y, "UP/DN Row | L/R Cursor | 0-9/DEL", 1 << 6, 0xffffffff, 0, 0, COLOR_BLACK, COLOR_WHITE, true, 0);
     }
 
     if (menu->notification) {
-        int x = 24;
-        int y = 2;
-        PrintMini(&x, &y, menu->notification, 1 << 6, 0xffffffff, 0, 0, COLOR_RED, COLOR_WHITE, true, 0);
-
-        if (RTC_Elapsed_ms(menu->notificationTime, 1000)) {
-            menu->notification = 0x0;
-            menu->notificationTime = -1;
-        }
+        // Keep the status bar visible behind an opaque, explicitly dismissed notice.
+        Bdisp_FilledRectangle(32, 48, 352, 136, TEXT_COLOR_WHITE);
+        Bdisp_Rectangle(32, 48, 352, 136, TEXT_COLOR_BLACK);
+        int x = 48;
+        int y = 64;
+        PrintMini(&x, &y, menu->notification, TEXT_MODE_TRANSPARENT_BACKGROUND, 0xffffffff, 0, 0, COLOR_RED, COLOR_WHITE, true, 0);
+        x = 48;
+        y = 104;
+        PrintMini(&x, &y, "EXE/EXIT: OK", TEXT_MODE_TRANSPARENT_BACKGROUND, 0xffffffff, 0, 0, COLOR_BLACK, COLOR_WHITE, true, 0);
     }
 }
 
 void Menu_handleKeypress(Menu* menu, int key) {
+    if (menu->notification) {
+        if (key == KEY_PRGM_RETURN || key == KEY_PRGM_EXIT) {
+            menu->notification = 0x0;
+            return;
+        }
+        if (menu->board) return;
+    }
+
     if (menu->board) {
         bool shouldExit = Board_handleKeypress(menu->board, key);
         if (shouldExit) {
@@ -239,7 +272,9 @@ void Menu_handleKeypress(Menu* menu, int key) {
 }
 
 void Menu_handleTextKeypress(Menu* menu, int key) {
-    if (!Menu_getCurrentSetting(menu)) return;
+    int* setting = Menu_getCurrentSetting(menu);
+    if (!setting) return;
+    int previousValue = *setting;
 
     // settingCursorPosition is zero if the cursor is at the very right!!!
 
@@ -294,9 +329,14 @@ void Menu_handleTextKeypress(Menu* menu, int key) {
             Menu_fixMineCount(menu);
         } break;
     }
+
+    if (*setting != previousValue) menu->notification = 0x0;
 }
 
 void Menu_fixMineCount(Menu* menu) {
+    if (menu->width > BOARD_MAX_WIDTH) menu->width = BOARD_MAX_WIDTH;
+    if (menu->height > BOARD_MAX_HEIGHT) menu->height = BOARD_MAX_HEIGHT;
+
     if (menu->mines > (menu->width * menu->height) * 0.9) {
         menu->mines = (menu->width * menu->height) * 0.9;
     }
@@ -305,19 +345,16 @@ void Menu_fixMineCount(Menu* menu) {
 void Menu_begin(Menu* menu) {
     if (menu->width < 2) {
         menu->notification = "Width cannot be <2!";
-        menu->notificationTime = RTC_GetTicks();
         return;
     }
 
     if (menu->height < 2) {
         menu->notification = "Height cannot be <2!";
-        menu->notificationTime = RTC_GetTicks();
         return;
     }
 
     if (menu->mines == 0) {
-        menu->notification = "Mines must be >1!";
-        menu->notificationTime = RTC_GetTicks();
+        menu->notification = "Mines must be >=1!";
         return;
     }
 

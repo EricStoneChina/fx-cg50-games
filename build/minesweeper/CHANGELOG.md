@@ -1,3 +1,6 @@
+## Unreleased
+- Add smart reveal/chord feedback: matching flags reveal neighbouring cells, while mismatched flags briefly highlight covered, unflagged neighbours.
+
 ## v1.1.0
 - Change reveal key from F2 to F6
 - Improve end animations

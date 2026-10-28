@@ -1,11 +1,13 @@
 #include "menu.h"
 #include "utils.h"
 #include "keyboard.h"
+#include "personal_best.h"
 #include <fxcg/display.h>
 #include <fxcg/keyboard.h>
 #include <fxcg/heap.h>
 #include <fxcg/system.h>
 #include <fxcg/rtc.h>
+#include "../../common/main_menu.h"
 
 int main() {
     Bdisp_AllClr_VRAM();
@@ -23,33 +25,52 @@ int main() {
     Utils_initKeyToNumberMap();
 
 
-    Menu* menu = sys_malloc(sizeof(Menu));
-    Menu_create(menu);
-
     while (true) {
-        Key_update();
+        Menu* menu = sys_malloc(sizeof(Menu));
+        Menu_create(menu);
 
-        // we basically overwrite all of vram every frame so this probably isnt
-        // necessary
-        Bdisp_AllClr_VRAM();
+        bool redraw = true;
+        unsigned int lastStatusTicks = (unsigned int)RTC_GetTicks();
+        while (true) {
+            Key_update();
+            int key = Key_pressed();
+            if (key) {
+                Menu_handleKeypress(menu, key);
+                redraw = true;
+            }
 
-        Menu_handleKeypress(menu, Key_pressed());
+            // File I/O stays outside reveal recursion and precedes the success label.
+            if (!PersonalBest_flush()) {
+                if (menu->board) menu->board->newPersonalBest = false;
+                menu->notification = "Best not saved!";
+                redraw = true;
+            }
 
-        // note all functions will fall through as needed
-        // i.e. Menu_draw will call Board_draw if it has a Board*
-        Menu_draw(menu);
+            unsigned int now = (unsigned int)RTC_GetTicks();
+            Board* board = menu->board;
+            if (board && board->highlightTicks >= 0 && RTC_Elapsed_ms(board->highlightTicks, 900)) redraw = true;
+            if (redraw) {
+                Bdisp_AllClr_VRAM();
+                Menu_draw(menu);
+            }
 
-        DisplayStatusArea();
+            unsigned int statusInterval = board && !board->firstReveal && !board->won && !board->lost ? 13u : 128u;
+            if (redraw || now - lastStatusTicks >= statusInterval) {
+                DisplayStatusArea();
+                Menu_drawStatusArea(menu);
+                Bdisp_PutDisp_DD();
+                lastStatusTicks = now;
+                redraw = false;
+            }
 
-        Menu_drawStatusArea(menu);
+            if (key == KEY_PRGM_MENU) break;
+            OS_InnerWait_ms(10);
+        }
 
-        Bdisp_PutDisp_DD();
-
-        // TODO: make this better
-        if (Key_pressed() == KEY_PRGM_MENU) break;
+        Menu_free(menu);
+        // Keep the OS add-in context resumable when this icon is opened again.
+        openMainMenu();
     }
-
-    Menu_free(menu);
 
     return 0;
 }

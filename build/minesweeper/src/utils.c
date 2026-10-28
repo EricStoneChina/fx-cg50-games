@@ -1,6 +1,7 @@
 #include "utils.h"
 #include <fxcg/keyboard.h>
 #include <fxcg/misc.h>
+#include <stdint.h>
 
 void Utils_drawSpriteAtPos(enum TileType sprite, int x, int y) {
     const color_t* data = getSprite(sprite);
@@ -41,11 +42,10 @@ int Utils_keyToNumber(int key) {
 // still wondering if the calculator comes with a random number generator that
 // could probably be seeded better?
 
-static int rng_state = 1; // seed however you want
+static uint32_t rng_state = 1;
 
 int Utils_rand() {
-    // signed wraparound still works as a pseudo-random generator
-    rng_state = rng_state * 1664525 + 1013904223;
+    rng_state = rng_state * 1664525u + 1013904223u;
     return (rng_state >> 16) & 0x7FFF; // make a positive-ish int
 }
 
