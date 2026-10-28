@@ -10,7 +10,6 @@ typedef struct {
     int settingRow;
 
     const char* notification;
-    int notificationTime;
 
     Board* board;
 } Menu;

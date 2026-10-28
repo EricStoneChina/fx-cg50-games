@@ -1,5 +1,7 @@
 #include "personal_best.h"
+#include "board.h"
 #include <fxcg/file.h>
+#include <limits.h>
 
 #define PERSONAL_BEST_MAGIC 0x4d535042
 #define PERSONAL_BEST_VERSION 1
@@ -21,7 +23,9 @@ typedef struct {
 
 static PersonalBestData data;
 static bool loaded = false;
-static bool dirty = false;
+static bool fileWritable = false;
+static int pendingIndex = -1;
+static PersonalBestRecord previousRecord;
 
 static void PersonalBest_clear(void) {
     data.magic = PERSONAL_BEST_MAGIC;
@@ -42,7 +46,6 @@ static void PersonalBest_path(unsigned short* path) {
 void PersonalBest_load(void) {
     if (loaded) return;
     loaded = true;
-    dirty = false;
     PersonalBest_clear();
 
     unsigned short path[32];
@@ -55,48 +58,53 @@ void PersonalBest_load(void) {
     if (size == (int)sizeof(PersonalBestData)) {
         result = Bfile_ReadFile_OS(handle, &data, sizeof(PersonalBestData), 0);
     }
-    Bfile_CloseFile_OS(handle);
+    int closeResult = Bfile_CloseFile_OS(handle);
 
-    if (result < 0 || data.magic != PERSONAL_BEST_MAGIC || data.version != PERSONAL_BEST_VERSION) {
+    if (result != (int)sizeof(PersonalBestData) || closeResult < 0 ||
+        data.magic != PERSONAL_BEST_MAGIC || data.version != PERSONAL_BEST_VERSION) {
         PersonalBest_clear();
+        return;
+    }
+
+    fileWritable = true;
+    for (int i = 0; i < PERSONAL_BEST_MAX_RECORDS; i++) {
+        PersonalBestRecord* record = &data.records[i];
+        if (record->width < 2 || record->width > BOARD_MAX_WIDTH ||
+            record->height < 2 || record->height > BOARD_MAX_HEIGHT ||
+            record->mines == 0 || record->mines >= record->width * record->height ||
+            record->reserved != 0 || record->deciseconds > INT_MAX) {
+            *record = (PersonalBestRecord){0};
+        }
     }
 }
 
-// Write-only save. No stack buffer, no reopen/verify: a full re-read needed a
-// ~1KB PersonalBestData on the stack and extra Bfile traffic, which combined
-// with reveal recursion caused TLB ERROR / hangs at game-complete time.
 static bool PersonalBest_save(void) {
     unsigned short path[32];
     PersonalBest_path(path);
 
-    int handle = Bfile_OpenFile_OS(path, READWRITE, 0);
-    if (handle >= 0 && Bfile_GetFileSize_OS(handle) != (int)sizeof(PersonalBestData)) {
-        Bfile_CloseFile_OS(handle);
-        Bfile_DeleteEntry(path);
-        handle = -1;
-    }
-
-    if (handle < 0) {
+    // Creation fails if an unread or damaged file already exists, preserving it.
+    if (!fileWritable) {
         size_t size = sizeof(PersonalBestData);
         if (Bfile_CreateEntry_OS(path, CREATEMODE_FILE, &size) < 0) return false;
-        handle = Bfile_OpenFile_OS(path, READWRITE, 0);
+        fileWritable = true;
     }
 
+    int handle = Bfile_OpenFile_OS(path, READWRITE, 0);
     if (handle < 0) return false;
-    if (Bfile_SeekFile_OS(handle, 0) < 0 ||
-        Bfile_WriteFile_OS(handle, &data, sizeof(PersonalBestData)) < 0) {
-        Bfile_CloseFile_OS(handle);
-        return false;
-    }
-    Bfile_CloseFile_OS(handle);
-    return true;
+    bool saved = Bfile_GetFileSize_OS(handle) == (int)sizeof(PersonalBestData) &&
+        Bfile_SeekFile_OS(handle, 0) >= 0 &&
+        Bfile_WriteFile_OS(handle, &data, sizeof(PersonalBestData)) == (int)sizeof(PersonalBestData);
+    if (Bfile_CloseFile_OS(handle) < 0) saved = false;
+    return saved;
 }
 
 bool PersonalBest_flush(void) {
-    if (!dirty) return true;
-    // One-shot: never retry Bfile every frame (that can hang the OS).
-    dirty = false;
-    return PersonalBest_save();
+    if (pendingIndex < 0) return true;
+    bool saved = PersonalBest_save();
+    if (!saved) data.records[pendingIndex] = previousRecord;
+    // Never retry failed writes every frame.
+    pendingIndex = -1;
+    return saved;
 }
 
 int PersonalBest_get(int width, int height, int mines) {
@@ -107,33 +115,35 @@ int PersonalBest_get(int width, int height, int mines) {
             return record->deciseconds;
         }
     }
-    return 0;
+    return -1;
 }
 
 bool PersonalBest_record(int width, int height, int mines, int deciseconds) {
     PersonalBest_load();
-    if (width <= 0 || height <= 0 || mines <= 0 || deciseconds <= 0) return false;
+    if (width < 2 || width > BOARD_MAX_WIDTH || height < 2 || height > BOARD_MAX_HEIGHT ||
+        mines <= 0 || mines >= width * height || deciseconds < 0 || pendingIndex >= 0) return false;
 
+    int index = -1;
     int empty = -1;
     int slowest = 0;
     for (int i = 0; i < PERSONAL_BEST_MAX_RECORDS; i++) {
         PersonalBestRecord* record = &data.records[i];
         if (record->width == width && record->height == height && record->mines == mines) {
-            if (record->deciseconds != 0 && record->deciseconds <= (unsigned int)deciseconds) return false;
-            record->deciseconds = deciseconds;
-            dirty = true;
-            return true;
+            if (record->deciseconds <= (unsigned int)deciseconds) return false;
+            index = i;
+            break;
         }
         if (empty < 0 && record->width == 0) empty = i;
         if (record->deciseconds > data.records[slowest].deciseconds) slowest = i;
     }
 
-    int index = empty >= 0 ? empty : slowest;
+    if (index < 0) index = empty >= 0 ? empty : slowest;
+    previousRecord = data.records[index];
+    pendingIndex = index;
     data.records[index].width = width;
     data.records[index].height = height;
     data.records[index].mines = mines;
     data.records[index].reserved = 0;
     data.records[index].deciseconds = deciseconds;
-    dirty = true;
     return true;
 }

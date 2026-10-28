@@ -47,10 +47,6 @@ static void Board_createInternal(Board* board, int width, int height, int mines,
 
     board->firstReveal = true;
 
-    board->startTicks = RTC_GetTicks();
-    board->endTicks = -1;
-    board->endTopAnimTicks = -1;
-    board->endTopAnimTimeShowing = true;
 
     board->highlightRow = -1;
     board->highlightCol = -1;
@@ -168,7 +164,6 @@ void Board_draw(Board* board) {
         TEXT_COLOR_BLACK
     );
 
-    Board_drawEndAnimation(board);
 }
 
 void Board_drawStatusArea(Board* board) {
@@ -176,118 +171,38 @@ void Board_drawStatusArea(Board* board) {
     int x = 24;
     int y = 2;
 
-    // draw status bar help text for the first 5 seconds
-    // else draw information
-    if (!RTC_Elapsed_ms(board->startTicks, 5000)) {
-        PrintMini(&x, &y, "F1", 1 << 6, 0xffffffff, 0, 0, COLOR_NAVY, COLOR_WHITE, true, 0);
+    unsigned char buf[12];
+    bool complete = board->won || board->lost;
+
+    if (complete) {
+        PrintMini(&x, &y, board->won ? "Won " : "Lost ", 1 << 6, 0xffffffff, 0, 0, COLOR_BLACK, COLOR_WHITE, true, 0);
+    } else {
+        int flagCount = 0;
+        for (int i = 0; i < board->width * board->height; i++) {
+            if (board->data[i] & FLAG_TILE_BIT) flagCount++;
+        }
+        PrintMini(&x, &y, "Flags ", 1 << 6, 0xffffffff, 0, 0, COLOR_BLACK, COLOR_WHITE, true, 0);
+        Utils_clearAndFillBuffer(buf, flagCount);
+        PrintMini(&x, &y, (const char*)buf, 1 << 6, 0xffffffff, 0, 0, COLOR_NAVY, COLOR_WHITE, true, 0);
         PrintMini(&x, &y, "/", 1 << 6, 0xffffffff, 0, 0, COLOR_BLACK, COLOR_WHITE, true, 0);
-        PrintMini(&x, &y, "ALPHA", 1 << 6, 0xffffffff, 0, 0, COLOR_NAVY, COLOR_WHITE, true, 0);
-        PrintMini(&x, &y, " Flag | ", 1 << 6, 0xffffffff, 0, 0, COLOR_BLACK, COLOR_WHITE, true, 0);
-        PrintMini(&x, &y, "F6", 1 << 6, 0xffffffff, 0, 0, COLOR_NAVY, COLOR_WHITE, true, 0);
-        PrintMini(&x, &y, "/", 1 << 6, 0xffffffff, 0, 0, COLOR_BLACK, COLOR_WHITE, true, 0);
-        PrintMini(&x, &y, "SHIFT", 1 << 6, 0xffffffff, 0, 0, COLOR_NAVY, COLOR_WHITE, true, 0);
-        PrintMini(&x, &y, " Reveal", 1 << 6, 0xffffffff, 0, 0, COLOR_BLACK, COLOR_WHITE, true, 0);
-        return;
+        Utils_clearAndFillBuffer(buf, board->mines);
+        PrintMini(&x, &y, (const char*)buf, 1 << 6, 0xffffffff, 0, 0, COLOR_NAVY, COLOR_WHITE, true, 0);
+        PrintMini(&x, &y, "  ", 1 << 6, 0xffffffff, 0, 0, COLOR_BLACK, COLOR_WHITE, true, 0);
     }
 
-    unsigned char buf[12]; // not sure if itll ever use 12 bytes but that's what's in the example
-
-    if (board->won) {
-        if (board->endTopAnimTicks == -1) {
-            board->endTopAnimTicks = RTC_GetTicks();
-        }
-
-        if (RTC_Elapsed_ms(board->endTopAnimTicks, 1500)) {
-            board->endTopAnimTimeShowing = !board->endTopAnimTimeShowing;
-            board->endTopAnimTicks = RTC_GetTicks();
-        }
-
-        if (board->endTopAnimTimeShowing) {
-            int seconds = board->centiseconds / 10;
-            int centiseconds = board->centiseconds % 10;
-
-            PrintMini(&x, &y, "Completed in ", 1 << 6, 0xffffffff, 0, 0, COLOR_BLACK, COLOR_WHITE, true, 0);
-            Utils_clearAndFillBuffer(buf, seconds);
-            PrintMini(&x, &y, (const char*)buf, 1 << 6, 0xffffffff, 0, 0, COLOR_NAVY, COLOR_WHITE, true, 0);
-            PrintMini(&x, &y, ".", 1 << 6, 0xffffffff, 0, 0, COLOR_BLACK, COLOR_WHITE, true, 0);
-            Utils_clearAndFillBuffer(buf, centiseconds);
-            PrintMini(&x, &y, (const char*)buf, 1 << 6, 0xffffffff, 0, 0, COLOR_NAVY, COLOR_WHITE, true, 0);
-            PrintMini(&x, &y, "s!", 1 << 6, 0xffffffff, 0, 0, COLOR_BLACK, COLOR_WHITE, true, 0);
-            if (board->newPersonalBest) {
-                PrintMini(&x, &y, " NEW PB!", 1 << 6, 0xffffffff, 0, 0, COLOR_RED, COLOR_WHITE, true, 0);
-            }
-        } else {
-            PrintMini(&x, &y, "(Press any button to return)", 1 << 6, 0xffffffff, 0, 0, COLOR_BLACK, COLOR_WHITE, true, 0);
-        }
-
-        return;
-    }
-
-    if (board->lost) {
-        PrintMini(&x, &y, "(Press any button to return)", 1 << 6, 0xffffffff, 0, 0, COLOR_BLACK, COLOR_WHITE, true, 0);
-        return;
-    }
-
-    // "8x8 (9 mines) 4/9 flagged"
-    // is there a way to make this neater? not really, right?
-
-    Utils_clearAndFillBuffer(buf, board->width);
+    Utils_clearAndFillBuffer(buf, board->centiseconds / 10);
     PrintMini(&x, &y, (const char*)buf, 1 << 6, 0xffffffff, 0, 0, COLOR_NAVY, COLOR_WHITE, true, 0);
-    PrintMini(&x, &y, "x", 1 << 6, 0xffffffff, 0, 0, COLOR_BLACK, COLOR_WHITE, true, 0);
-    Utils_clearAndFillBuffer(buf, board->height);
+    PrintMini(&x, &y, ".", 1 << 6, 0xffffffff, 0, 0, COLOR_BLACK, COLOR_WHITE, true, 0);
+    Utils_clearAndFillBuffer(buf, board->centiseconds % 10);
     PrintMini(&x, &y, (const char*)buf, 1 << 6, 0xffffffff, 0, 0, COLOR_NAVY, COLOR_WHITE, true, 0);
-    PrintMini(&x, &y, " (", 1 << 6, 0xffffffff, 0, 0, COLOR_BLACK, COLOR_WHITE, true, 0);
-    Utils_clearAndFillBuffer(buf, board->mines);
-    PrintMini(&x, &y, (const char*)buf, 1 << 6, 0xffffffff, 0, 0, COLOR_TEAL, COLOR_WHITE, true, 0);
-    const char* str = " mines) ";
-    if (board->mines == 1) str = " mine) ";
-    PrintMini(&x, &y, str, 1 << 6, 0xffffffff, 0, 0, COLOR_BLACK, COLOR_WHITE, true, 0);
-
-    int flagCount = 0;
-    for (int i = 0; i < board->width * board->height; i++) {
-        if (board->data[i] & FLAG_TILE_BIT) flagCount++;
+    PrintMini(&x, &y, "s", 1 << 6, 0xffffffff, 0, 0, COLOR_BLACK, COLOR_WHITE, true, 0);
+    if (board->newPersonalBest) {
+        PrintMini(&x, &y, " NEW PB!", 1 << 6, 0xffffffff, 0, 0, COLOR_RED, COLOR_WHITE, true, 0);
     }
-    Utils_clearAndFillBuffer(buf, flagCount);
-    PrintMini(&x, &y, (const char*)buf, 1 << 6, 0xffffffff, 0, 0, COLOR_NAVY, COLOR_WHITE, true, 0);
-    PrintMini(&x, &y, "/", 1 << 6, 0xffffffff, 0, 0, COLOR_BLACK, COLOR_WHITE, true, 0);
-    Utils_clearAndFillBuffer(buf, board->mines);
-    PrintMini(&x, &y, (const char*)buf, 1 << 6, 0xffffffff, 0, 0, COLOR_TEAL, COLOR_WHITE, true, 0);
-    PrintMini(&x, &y, " flagged", 1 << 6, 0xffffffff, 0, 0, COLOR_BLACK, COLOR_WHITE, true, 0);
-}
-
-#define RAINBOW_LENGTH 48
-color_t rainbow[48] = {
-    63488, 63712, 63968, 64224, 64480, 64736, 64992, 65248,
-    65504, 57312, 49120, 40928, 32736, 24544, 16352,  8160,
-      224,   480,   736,   992,  1248,  1504,  1760,  2016,
-     2272,  2528,  2784,  3040,  3296,  3552,  3808,  4064,
-       31,  6175, 14367, 22559, 30751, 38943, 47135, 55327,
-    63519, 63515, 63511, 63507, 63503, 63499, 63495, 63491
-};
-
-void Board_drawEndAnimation(Board* board) {
-    if (!board->won && !board->lost) return;
-
-    const char* str;
-    int speed;
-
-    if (board->won)  str = "GAME COMPLETE!";
-    else             str = "GAME OVER!";
-
-    if (board->won) speed = 100;
-    else            speed = 20;
-
-    for (int i = 0; i < RAINBOW_LENGTH+1; i++) {
-        color_t col;
-        if (i == RAINBOW_LENGTH) col = COLOR_BLACK;
-        else col = rainbow[i];
-        if (RTC_Elapsed_ms(board->endTicks, i*speed)) {
-            PrintCXY(i*2 + 24, i*2 + 24, str, TEXT_MODE_TRANSPARENT_BACKGROUND, -1, col, COLOR_WHITE, true, 0);
-        }
+    if (complete) {
+        PrintMini(&x, &y, " EXE/EXIT", 1 << 6, 0xffffffff, 0, 0, COLOR_BLACK, COLOR_WHITE, true, 0);
     }
 }
-
-#undef RAINBOW_LENGTH
 
 int code[7] = {
     KEY_PRGM_8,
@@ -302,14 +217,15 @@ int code[7] = {
 // returns true if the game should be exited back to the setup screen
 bool Board_handleKeypress(Board* board, int key) {
     if (board->won || board->lost) {
-        if (key) return true;
+        if (key == KEY_PRGM_RETURN || key == KEY_PRGM_EXIT) return true;
+        // Inspect the final board without changing cells or dismissing the result.
+        if (key != KEY_PRGM_UP && key != KEY_PRGM_DOWN &&
+            key != KEY_PRGM_LEFT && key != KEY_PRGM_RIGHT) return false;
     }
-
-    if (board->won || board->lost) return false;
 
     if (key) board->highlightTicks = -1;
 
-    if (key == code[board->konamiCodeIndex]) {
+    if (!board->won && !board->lost && key == code[board->konamiCodeIndex]) {
         board->konamiCodeIndex++;
 
         if (board->konamiCodeIndex == 7) {
@@ -350,8 +266,7 @@ bool Board_handleKeypress(Board* board, int key) {
 
         case KEY_PRGM_F6:
         case KEY_PRGM_SHIFT: {
-            // false for no force
-            Board_revealSingleCell(board, board->row, board->col, false);
+            Board_revealSingleCell(board, board->row, board->col);
         } break;
 
         case KEY_PRGM_EXIT: {
@@ -419,7 +334,7 @@ void _revealCellIfNotFlagged(Board* board, int row, int col, void* _unused) {
     if (board->won || board->lost) return;
     char* cell = Board_getCell(board, row, col);
     if (!Board_cellIsFlagged(cell) && Board_cellIsCovered(cell)) {
-        Board_revealSingleCell(board, row, col, true);
+        Board_revealSingleCell(board, row, col);
     }
 }
 
@@ -446,11 +361,16 @@ void _highlightSurroundingCells(Board* board, int row, int col) {
     board->highlightTicks = RTC_GetTicks();
 }
 
-void Board_revealSingleCell(Board* board, int row, int col, bool force) {
+void Board_revealSingleCell(Board* board, int row, int col) {
     if (board->won || board->lost) return;
 
     board->highlightTicks = -1;
     char* cell = Board_getCell(board, row, col);
+
+    if (Board_cellIsFlagged(cell)) {
+        *cell ^= FLAG_TILE_BIT;
+        return;
+    }
 
     if (board->firstReveal) {
         // oooh exciting exciting
@@ -462,6 +382,9 @@ void Board_revealSingleCell(Board* board, int row, int col, bool force) {
         // room, its eight neighbours are safe too, making the first cell zero.
         Board* newBoard = sys_malloc(sizeof(Board));
         Board_createSafe(newBoard, board->width, board->height, board->mines, /* fake */ true, row, col);
+        for (int i = 0; i < board->width * board->height; i++) {
+            newBoard->data[i] |= board->data[i] & FLAG_TILE_BIT;
+        }
         sys_free(board->data);
         board->data = newBoard->data;
         board->mines = newBoard->mines;
@@ -486,20 +409,12 @@ void Board_revealSingleCell(Board* board, int row, int col, bool force) {
         return;
     }
 
-    // if it's flagged, unflag
-    if (Board_cellIsFlagged(cell)) {
-        *cell ^= FLAG_TILE_BIT;
-
-        // if we NEED to reveal this cell, continue going, else just stop here
-        if (!force) return;
-    }
-
     *cell &= ~COVER_TILE_BIT; // unset covered bit
     *cell &= ~FLAG_TILE_BIT;
 
     if (*cell == kTileTypeMine) {
         // uh oh!
-        Board_kablooey(board);
+        Board_kablooey(board, row, col);
         return;
     }
 
@@ -515,7 +430,7 @@ void Board_revealSingleCell(Board* board, int row, int col, bool force) {
     }
 }
 
-void Board_kablooey(Board* board) {
+void Board_kablooey(Board* board, int row, int col) {
     if (board->won || board->lost) return;
 
     Board_onGameComplete(board, false);
@@ -537,7 +452,7 @@ void Board_kablooey(Board* board) {
         }
     }
 
-    (*Board_getCell(board, board->row, board->col)) = kTileTypeHitMine;
+    (*Board_getCell(board, row, col)) = kTileTypeHitMine;
 }
 
 void Board_onGameComplete(Board* board, bool won) {
@@ -549,25 +464,17 @@ void Board_onGameComplete(Board* board, bool won) {
         board->won = true;
         // Memory-only PB update. File write is PersonalBest_flush() from the
         // main loop, never from inside reveal recursion (stack + Bfile TLB).
-        board->newPersonalBest = PersonalBest_record(board->width, board->height, board->mines, board->centiseconds);
+        // The hidden completion sequence is not eligible for personal bests.
+        if (board->konamiCodeIndex != 7) {
+            board->newPersonalBest = PersonalBest_record(board->width, board->height, board->mines, board->centiseconds);
+        }
     }
     else     board->lost = true;
-    board->endTicks = RTC_GetTicks();
-}
-
-// will reveal all surrounding tiles that aren't covered
-// note: force is enabled here, since we want to always uncover the tiles,
-// regardless of if they're flagged or not
-void _revealCellIfCovered(Board* board, int row, int col, void* _unused) {
-    if (board->won || board->lost) return;
-    if (Board_cellIsCovered(Board_getCell(board, row, col))) {
-        Board_revealSingleCell(board, row, col, true);
-    }
 }
 
 void Board_revealSurroundingCells(Board* board, int row, int col) {
     if (board->won || board->lost) return;
-    Board_runForSurroundingCells(board, row, col, _revealCellIfCovered, 0x0);
+    Board_runForSurroundingCells(board, row, col, _revealCellIfNotFlagged, 0x0);
 }
 
 void Board_runForSurroundingCells(Board* board, int row, int col, void(*callback)(Board*, int, int, void*), void* data) {

@@ -4,6 +4,7 @@ PrizmSDK-win-*.zip
 src/*.zip
 
 # Compiler outputs and temporary logs
+.build/
 *.o
 *.d
 *.bin
